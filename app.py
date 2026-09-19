@@ -153,21 +153,28 @@ async def collect_tokens(request: Request):
 
     accounts = body.get("accounts", [])
     
-    if not accounts:
+    # If accounts lack session strings, pull latest_backup_zip from Cloudflare KV
+    has_sessions = any(a.get("session_string") or a.get("session") for a in accounts) if accounts else False
+    if not has_sessions:
+        import zipfile
+        import io
         async with aiohttp.ClientSession() as http:
             for cf_url in CF_WORKER_URLS:
                 try:
-                    async with http.get(f"{cf_url}/api/fleet/live", headers={"Authorization": f"Bearer {SECRET_KEY}"}, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    async with http.get(f"{cf_url}/backup.zip", timeout=aiohttp.ClientTimeout(total=15)) as r:
                         if r.status == 200:
-                            fleet_data = await r.json()
-                            accounts = fleet_data.get("accounts", [])
-                            if accounts:
-                                break
+                            zip_bytes = await r.read()
+                            with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                                if "accounts.json" in zf.namelist():
+                                    raw_acc = zf.read("accounts.json").decode("utf-8")
+                                    accounts = json.loads(raw_acc)
+                                    logger.info(f"Loaded {len(accounts)} accounts with sessions from Cloudflare KV backup archive.")
+                                    break
                 except Exception as e:
-                    logger.warning(f"Could not fetch fleet from {cf_url}: {e}")
+                    logger.warning(f"Could not load backup zip from {cf_url}: {e}")
 
     if not accounts:
-        return {"ok": True, "message": "No accounts provided or found in fleet sync", "collected": 0}
+        return {"ok": True, "message": "No accounts with sessions found in backup archive or body", "collected": 0}
 
     LAST_BATCH_RUN["status"] = "running"
     LAST_BATCH_RUN["timestamp"] = time.time()
