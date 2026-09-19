@@ -4,6 +4,7 @@ import json
 import asyncio
 import urllib.parse
 import logging
+import re
 import aiohttp
 from fastapi import FastAPI, HTTPException, Request
 from telethon import TelegramClient
@@ -20,12 +21,18 @@ SECRET_KEY = os.getenv("SECRET_KEY", "agy_cf_secret_7d36994e_2026")
 API_ID = int(os.getenv("TELEGRAM_API_ID", "23788736"))
 API_HASH = os.getenv("TELEGRAM_API_HASH", "8098c495e2820d82935041ff91176b65")
 REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID", "6727787768")
-CF_WORKER_URL = os.getenv("CF_WORKER_URL", "https://restore-agy.aaaai2.workers.dev")
+
+CF_WORKER_URLS = [
+    "https://restore-agy.aaaai2.workers.dev",
+    "https://restore-agy.aaa-bot.workers.dev",
+    "https://restore-agy.aaa222.workers.dev"
+]
 
 STONES_BOT = "stoneswithestand_bot"
 MRG_BOT = "mrgminerbot"
 MRG_REFERRAL_CODE = "ref_IRN1G3XD"
 ART_BOT = "ART_AIRDROP_BOT"
+BNB_BOT = "CryptoProUpRobot"
 
 LAST_BATCH_RUN = {
     "status": "idle",
@@ -39,7 +46,8 @@ async def root():
         "status": "online",
         "service": "MY AGY AI Standby Batch Session Link Collector",
         "provider": "Render Cloud (Free Tier)",
-        "purpose": "Wakes up when 24h tokens have <= 4h remaining, collects batch session links, syncs to Cloudflare KV, and spins down to save free hours.",
+        "purpose": "Wakes up on-demand to collect batch session links, syncs to 3x Cloudflare KV, triggers cloud farming, and spins down to save free hours.",
+        "nodes": CF_WORKER_URLS,
         "last_run": LAST_BATCH_RUN
     }
 
@@ -109,6 +117,21 @@ async def extract_tokens_for_account(acc: dict) -> dict:
         except Exception as e:
             logger.debug(f"[{name}] ART error: {e}")
 
+        # 4. BNB Galaxy Webhook Link
+        try:
+            messages = await client.get_messages(BNB_BOT, limit=20)
+            for msg in messages:
+                for text_val in [getattr(msg, "text", None), getattr(msg, "raw_text", None)]:
+                    if text_val and "wh=" in text_val:
+                        m = re.search(r"wh=([^&\s\"'>]+)", text_val)
+                        if m:
+                            tokens["bnb_wh_url"] = urllib.parse.unquote(m.group(1))
+                            break
+                if "bnb_wh_url" in tokens:
+                    break
+        except Exception as e:
+            logger.debug(f"[{name}] BNB webhook error: {e}")
+
     except Exception as e:
         logger.error(f"[{name}] Telethon connection error: {e}")
     finally:
@@ -132,13 +155,16 @@ async def collect_tokens(request: Request):
     
     if not accounts:
         async with aiohttp.ClientSession() as http:
-            try:
-                async with http.get(f"{CF_WORKER_URL}/api/fleet/live", headers={"Authorization": f"Bearer {SECRET_KEY}"}, timeout=aiohttp.ClientTimeout(total=8)) as r:
-                    if r.status == 200:
-                        fleet_data = await r.json()
-                        accounts = fleet_data.get("accounts", [])
-            except Exception as e:
-                logger.warning(f"Could not fetch fleet from CF: {e}")
+            for cf_url in CF_WORKER_URLS:
+                try:
+                    async with http.get(f"{cf_url}/api/fleet/live", headers={"Authorization": f"Bearer {SECRET_KEY}"}, timeout=aiohttp.ClientTimeout(total=8)) as r:
+                        if r.status == 200:
+                            fleet_data = await r.json()
+                            accounts = fleet_data.get("accounts", [])
+                            if accounts:
+                                break
+                except Exception as e:
+                    logger.warning(f"Could not fetch fleet from {cf_url}: {e}")
 
     if not accounts:
         return {"ok": True, "message": "No accounts provided or found in fleet sync", "collected": 0}
@@ -153,19 +179,33 @@ async def collect_tokens(request: Request):
         if tokens:
             collected_batch[uid] = tokens
             async with aiohttp.ClientSession() as http:
-                try:
-                    await http.post(
-                        f"{CF_WORKER_URL}/api/miniapp/tokens/sync",
-                        json=tokens,
-                        headers={
-                            "Authorization": f"Bearer {SECRET_KEY}",
-                            "Content-Type": "application/json",
-                            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                        },
-                        timeout=aiohttp.ClientTimeout(total=6)
-                    )
-                except Exception as se:
-                    logger.warning(f"Sync error to CF: {se}")
+                for cf_url in CF_WORKER_URLS:
+                    try:
+                        await http.post(
+                            f"{cf_url}/api/miniapp/tokens/sync",
+                            json=tokens,
+                            headers={
+                                "Authorization": f"Bearer {SECRET_KEY}",
+                                "Content-Type": "application/json",
+                                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                            },
+                            timeout=aiohttp.ClientTimeout(total=6)
+                        )
+                    except Exception as se:
+                        logger.warning(f"Sync error to {cf_url}: {se}")
+
+    # Trigger Cloudflare Edge Autonomous Cloud Farming
+    async with aiohttp.ClientSession() as http:
+        for idx, cf_url in enumerate(CF_WORKER_URLS):
+            try:
+                await http.post(
+                    f"{cf_url}/api/farm/bnb",
+                    json={},
+                    headers={"Authorization": f"Bearer {SECRET_KEY}", "Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+            except Exception:
+                pass
 
     LAST_BATCH_RUN["status"] = "completed"
     LAST_BATCH_RUN["collected"] = len(collected_batch)
@@ -175,5 +215,5 @@ async def collect_tokens(request: Request):
         "ok": True,
         "collected": len(collected_batch),
         "timestamp": time.time(),
-        "message": "Batch session links collected and synced to Cloudflare KV. Standby node entering sleep."
+        "message": "Batch session links collected and synced to 3x Cloudflare KV nodes. Cloud farming dispatched. Standby node entering sleep."
     }
