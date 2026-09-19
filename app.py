@@ -28,6 +28,11 @@ CF_WORKER_URLS = [
     "https://restore-agy.aaa222.workers.dev"
 ]
 
+SUPABASE_URL = os.getenv("SUPABASE_URL", "https://znbbaozpevurvbfkxakz.supabase.co")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpuYmJhb3pwZXZ1cnZiZmt4YWt6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODk4MTYxNTQsImV4cCI6MjEwNTM5MjE1NH0.ldgn0gCtOLEPUQyvTiG5RgKX6VY0LrS_4LkIKCf8NqM")
+UPSTASH_URL = os.getenv("UPSTASH_URL", "https://relaxing-starfish-285827.upstash.io")
+UPSTASH_TOKEN = os.getenv("UPSTASH_TOKEN", "gQAAAAAABFyDAAIgcDI5MDYyYWZjNzYzNzk0ZmRjYjhmNTA4ZDI4ODlmODkzNw")
+
 STONES_BOT = "stoneswithestand_bot"
 MRG_BOT = "mrgminerbot"
 MRG_REFERRAL_CODE = "ref_IRN1G3XD"
@@ -186,6 +191,7 @@ async def collect_tokens(request: Request):
         if tokens:
             collected_batch[uid] = tokens
             async with aiohttp.ClientSession() as http:
+                # 1. Sync to 3x Cloudflare KV
                 for cf_url in CF_WORKER_URLS:
                     try:
                         await http.post(
@@ -196,10 +202,38 @@ async def collect_tokens(request: Request):
                                 "Content-Type": "application/json",
                                 "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
                             },
-                            timeout=aiohttp.ClientTimeout(total=6)
+                            timeout=aiohttp.ClientTimeout(total=5)
                         )
                     except Exception as se:
                         logger.warning(f"Sync error to {cf_url}: {se}")
+
+                # 2. Sync to Upstash Redis
+                if UPSTASH_URL and UPSTASH_TOKEN:
+                    try:
+                        await http.post(
+                            f"{UPSTASH_URL}/set/fleet:tokens:{uid}",
+                            data=json.dumps(tokens),
+                            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
+                            timeout=aiohttp.ClientTimeout(total=4)
+                        )
+                    except Exception as ue:
+                        logger.warning(f"Upstash token sync note: {ue}")
+
+                # 3. Sync to Supabase Postgres
+                if SUPABASE_URL and SUPABASE_KEY:
+                    try:
+                        await http.patch(
+                            f"{SUPABASE_URL}/rest/v1/fleet_accounts?id=eq.{uid}",
+                            json={"data": tokens},
+                            headers={
+                                "apikey": SUPABASE_KEY,
+                                "Authorization": f"Bearer {SUPABASE_KEY}",
+                                "Content-Type": "application/json"
+                            },
+                            timeout=aiohttp.ClientTimeout(total=4)
+                        )
+                    except Exception as sbe:
+                        logger.warning(f"Supabase account update note: {sbe}")
 
     # Trigger Cloudflare Edge Autonomous Cloud Farming
     async with aiohttp.ClientSession() as http:
