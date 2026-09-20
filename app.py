@@ -263,7 +263,7 @@ async def collect_tokens(request: Request):
 # CLOUD BNB GALAXY AUTONOMOUS ENGINE (Balance Checks & Auto-Withdrawals)
 # ============================================================================
 MIN_WITHDRAWAL = float(os.getenv("MIN_WITHDRAWAL", "0.000055"))
-DEFAULT_WALLET = os.getenv("WALLET_ADDRESS", "0x00A09b910A3A25c898c8D64a4D436f56A2D40995")
+DEFAULT_WALLET = os.getenv("WALLET_ADDRESS", "0xfda4182001672b9f0f09e2118242e543e35ed5ce")
 CLOUD_BNB_STATUS = {
     "last_cycle_at": 0,
     "status": "idle",
@@ -324,7 +324,7 @@ async def check_and_auto_withdraw_cloud(acc: dict) -> dict:
         await client.send_message(BNB_BOT, "💰 Balance")
 
         balance = 0.0
-        for _ in range(5):
+        for _ in range(8):
             await asyncio.sleep(1.0)
             msgs = await client.get_messages(BNB_BOT, limit=3)
             found = False
@@ -403,7 +403,7 @@ async def check_and_auto_withdraw_cloud(acc: dict) -> dict:
                     for row in bot_msg.buttons:
                         for btn in row:
                             btn_t = (btn.text or "").lower()
-                            if any(w in btn_t for w in ["confirm", "yes", "proceed", "submit", "accept"]):
+                            if any(w in btn_t for w in ["confirm", "yes", "proceed", "submit", "accept", "agree"]):
                                 try:
                                     await btn.click()
                                     await asyncio.sleep(1.5)
@@ -420,17 +420,17 @@ async def check_and_auto_withdraw_cloud(acc: dict) -> dict:
                     email_submitted = True
                     continue
 
-                if any(w in bot_lower for w in ["wallet address", "submit your bnb", "bep-20", "enter your wallet"]) and not wallet_submitted:
+                if any(w in bot_lower for w in ["wallet address", "submit your bnb", "bep-20", "bep20", "enter your wallet", "enter bnb"]) and not wallet_submitted:
                     await client.send_message(BNB_BOT, target_wallet)
                     wallet_submitted = True
                     continue
 
-                if any(w in bot_lower for w in ["enter the amount", "amount of bnb", "how much", "minimum withdrawal", "min:"]) and not amount_submitted:
+                if any(w in bot_lower for w in ["enter the amount", "amount of bnb", "how much", "minimum withdrawal", "min:", "enter amount", "amount to withdraw"]) and not amount_submitted:
                     await client.send_message(BNB_BOT, amount_str)
                     amount_submitted = True
                     continue
 
-                if not amount_submitted:
+                if not amount_submitted and wallet_submitted:
                     await client.send_message(BNB_BOT, amount_str)
                     amount_submitted = True
                     continue
@@ -447,12 +447,15 @@ async def check_and_auto_withdraw_cloud(acc: dict) -> dict:
             }
             async with aiohttp.ClientSession() as http:
                 while v_count < 5:
-                    async with http.post("https://justtool.site/api/adsgram-task3", headers=headers, json={"tgId": int(uid), "name": f"Member {uid}"}) as step_r:
-                        if step_r.status == 200:
-                            s_data = await step_r.json()
-                            v_count = s_data.get("count", v_count + 1)
-                        else:
-                            break
+                    try:
+                        async with http.post("https://justtool.site/api/adsgram-task3", headers=headers, json={"tgId": int(uid), "name": f"Member {uid}"}, timeout=aiohttp.ClientTimeout(total=5)) as step_r:
+                            if step_r.status == 200:
+                                s_data = await step_r.json()
+                                v_count = s_data.get("count", v_count + 1)
+                            else:
+                                break
+                    except Exception:
+                        break
                     if v_count < 5:
                         await asyncio.sleep(1.2)
 
