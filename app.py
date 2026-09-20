@@ -38,6 +38,11 @@ MRG_BOT = "mrgminerbot"
 MRG_REFERRAL_CODE = "ref_IRN1G3XD"
 ART_BOT = "ART_AIRDROP_BOT"
 BNB_BOT = "CryptoProUpRobot"
+AILAB_BOT = "AiLab_robot"
+ULTRAWALLET_BOT = "UltrawalletTrade_Bot"
+ULTRAWALLET_REFERRAL_CODE = "6727787768"
+APX_BOT = "ApxMinerBot"
+APX_REFERRAL_CODE = "6727787768"
 
 LAST_BATCH_RUN = {
     "status": "idle",
@@ -137,6 +142,54 @@ async def extract_tokens_for_account(acc: dict) -> dict:
         except Exception as e:
             logger.debug(f"[{name}] BNB webhook error: {e}")
 
+        # 5. AI Lab Robot WebApp initData
+        try:
+            bot_ai = await client.get_entity(AILAB_BOT)
+            res_ai = await client(RequestWebViewRequest(
+                peer=bot_ai,
+                bot=bot_ai,
+                platform="android",
+                url="https://ailab-agent.online/"
+            ))
+            parsed_ai = urllib.parse.urlparse(res_ai.url)
+            ai_init = urllib.parse.parse_qs(parsed_ai.fragment).get("tgWebAppData", [None])[0]
+            if ai_init:
+                tokens["ailab_init_data"] = ai_init
+        except Exception as aie:
+            logger.debug(f"[{name}] AI Lab error: {aie}")
+
+        # 6. UltraWallet WebApp initData
+        try:
+            bot_uw = await client.get_input_entity(ULTRAWALLET_BOT)
+            res_uw = await client(RequestAppWebViewRequest(
+                peer=bot_uw,
+                app=InputBotAppShortName(bot_id=bot_uw, short_name="app"),
+                platform="android",
+                start_param=str(ULTRAWALLET_REFERRAL_CODE)
+            ))
+            parsed_uw = urllib.parse.urlparse(res_uw.url)
+            uw_init = urllib.parse.parse_qs(parsed_uw.fragment).get("tgWebAppData", [None])[0]
+            if uw_init:
+                tokens["ultrawallet_init_data"] = uw_init
+        except Exception as uwe:
+            logger.debug(f"[{name}] UltraWallet error: {uwe}")
+
+        # 7. Apex Miner WebApp initData
+        try:
+            bot_apx = await client.get_input_entity(APX_BOT)
+            res_apx = await client(RequestAppWebViewRequest(
+                peer=bot_apx,
+                app=InputBotAppShortName(bot_id=bot_apx, short_name="app"),
+                platform="android",
+                start_param=str(APX_REFERRAL_CODE)
+            ))
+            parsed_apx = urllib.parse.urlparse(res_apx.url)
+            apx_init = urllib.parse.parse_qs(parsed_apx.fragment).get("tgWebAppData", [None])[0]
+            if apx_init:
+                tokens["apx_init_data"] = apx_init
+        except Exception as apx_e:
+            logger.debug(f"[{name}] Apex Miner error: {apx_e}")
+
     except Exception as e:
         logger.error(f"[{name}] Telethon connection error: {e}")
     finally:
@@ -235,13 +288,13 @@ async def collect_tokens(request: Request):
                     except Exception as sbe:
                         logger.warning(f"Supabase account update note: {sbe}")
 
-    # Trigger Cloudflare Edge Autonomous Cloud Farming
+    # Trigger Cloudflare Edge Autonomous Cloud Farming for ALL bots
     async with aiohttp.ClientSession() as http:
         for idx, cf_url in enumerate(CF_WORKER_URLS):
             try:
                 await http.post(
-                    f"{cf_url}/api/farm/bnb",
-                    json={},
+                    f"{cf_url}/api/farm/all",
+                    json={"all": True, "bot": "all"},
                     headers={"Authorization": f"Bearer {SECRET_KEY}", "Content-Type": "application/json"},
                     timeout=aiohttp.ClientTimeout(total=10)
                 )
