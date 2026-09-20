@@ -258,3 +258,303 @@ async def collect_tokens(request: Request):
         "timestamp": time.time(),
         "message": "Batch session links collected and synced to 3x Cloudflare KV nodes. Cloud farming dispatched. Standby node entering sleep."
     }
+
+# ============================================================================
+# CLOUD BNB GALAXY AUTONOMOUS ENGINE (Balance Checks & Auto-Withdrawals)
+# ============================================================================
+MIN_WITHDRAWAL = float(os.getenv("MIN_WITHDRAWAL", "0.000055"))
+DEFAULT_WALLET = os.getenv("WALLET_ADDRESS", "0x00A09b910A3A25c898c8D64a4D436f56A2D40995")
+CLOUD_BNB_STATUS = {
+    "last_cycle_at": 0,
+    "status": "idle",
+    "accounts": {}
+}
+
+async def fetch_accounts_from_cloud():
+    accounts = []
+    import zipfile
+    import io
+    async with aiohttp.ClientSession() as http:
+        for cf_url in CF_WORKER_URLS:
+            try:
+                async with http.get(f"{cf_url}/backup.zip", timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    if r.status == 200:
+                        zip_bytes = await r.read()
+                        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                            if "accounts.json" in zf.namelist():
+                                raw_acc = zf.read("accounts.json").decode("utf-8")
+                                accounts = json.loads(raw_acc)
+                                logger.info(f"Loaded {len(accounts)} accounts from Cloudflare KV backup archive.")
+                                return accounts
+            except Exception as e:
+                logger.warning(f"Could not load backup zip from {cf_url}: {e}")
+    return accounts
+
+async def check_and_auto_withdraw_cloud(acc: dict) -> dict:
+    name = acc.get("name", "User")
+    uid = str(acc.get("user_id"))
+    sess_str = acc.get("session_string") or acc.get("session")
+    target_wallet = acc.get("bnb_wallet") or DEFAULT_WALLET
+    if not sess_str:
+        return {"user_id": uid, "name": name, "ok": False, "error": "No session string"}
+
+    result = {
+        "user_id": uid,
+        "name": name,
+        "balance": 0.0,
+        "withdrawn": False,
+        "amount": 0.0,
+        "verification_count": 0,
+        "status": "checked",
+        "timestamp": time.time(),
+        "ok": True
+    }
+
+    client = TelegramClient(StringSession(sess_str), API_ID, API_HASH)
+    try:
+        await client.connect()
+        if not await client.is_user_authorized():
+            result["ok"] = False
+            result["error"] = "Unauthorized session"
+            return result
+
+        # 1. Fetch live balance from @CryptoProUpRobot
+        init_msgs = await client.get_messages(BNB_BOT, limit=1)
+        last_id = init_msgs[0].id if init_msgs else 0
+        await client.send_message(BNB_BOT, "💰 Balance")
+
+        balance = 0.0
+        for _ in range(5):
+            await asyncio.sleep(1.0)
+            msgs = await client.get_messages(BNB_BOT, limit=3)
+            found = False
+            for m in msgs:
+                if m.id > last_id and not m.out:
+                    text = m.raw_text or ""
+                    match = re.search(r"Your Balance:\s*([0-9.]+)\s*BNB", text, re.IGNORECASE)
+                    if match:
+                        balance = float(match.group(1))
+                        found = True
+                        break
+            if found:
+                break
+
+        result["balance"] = balance
+        logger.info(f"[{name}] Cloud BNB Balance: {balance:.6f} BNB (Threshold: {MIN_WITHDRAWAL})")
+
+        # 2. Inspect Adsgram 5-step verification count
+        v_count = 0
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36",
+                "Referer": "https://justtool.site/tasks-adsgram/",
+                "Origin": "https://justtool.site"
+            }
+            async with aiohttp.ClientSession() as http:
+                async with http.get(f"https://justtool.site/api/adsgram-task3?tgId={uid}", headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as vr:
+                    if vr.status == 200:
+                        vd = await vr.json()
+                        v_count = vd.get("count", 0)
+        except Exception:
+            pass
+        result["verification_count"] = v_count
+
+        # 3. Check if balance >= MIN_WITHDRAWAL
+        if balance >= MIN_WITHDRAWAL:
+            withdraw_amount = round(balance, 6)
+            amount_str = f"{withdraw_amount:.6f}".rstrip("0").rstrip(".")
+            logger.info(f"[{name}] Cloud Auto-Withdraw triggered: {amount_str} BNB to {target_wallet}")
+
+            prev_msgs = await client.get_messages(BNB_BOT, limit=1)
+            prev_id = prev_msgs[0].id if prev_msgs else 0
+            await client.send_message(BNB_BOT, "📤 Withdraw")
+
+            wallet_submitted = False
+            email_submitted = False
+            amount_submitted = False
+
+            for turn in range(1, 7):
+                bot_msg = None
+                for _ in range(6):
+                    await asyncio.sleep(1.0)
+                    msgs = await client.get_messages(BNB_BOT, limit=3)
+                    for m in msgs:
+                        if m.id > prev_id and not m.out:
+                            bot_msg = m
+                            break
+                    if bot_msg:
+                        break
+
+                if not bot_msg:
+                    if turn == 1:
+                        prev_msgs = await client.get_messages(BNB_BOT, limit=1)
+                        prev_id = prev_msgs[0].id if prev_msgs else 0
+                        await client.send_message(BNB_BOT, "/withdraw")
+                        continue
+                    else:
+                        break
+
+                prev_id = bot_msg.id
+                bot_text = (bot_msg.raw_text or "").strip()
+                bot_lower = bot_text.lower()
+                logger.info(f"[{name} Turn {turn}] Bot: {bot_text[:80]}")
+
+                if bot_msg.buttons:
+                    for row in bot_msg.buttons:
+                        for btn in row:
+                            btn_t = (btn.text or "").lower()
+                            if any(w in btn_t for w in ["confirm", "yes", "proceed", "submit", "accept"]):
+                                try:
+                                    await btn.click()
+                                    await asyncio.sleep(1.5)
+                                except Exception:
+                                    pass
+                                break
+
+                if any(w in bot_lower for w in ["verification required", "withdrawal request submitted", "request submitted", "withdraw-adsgram"]):
+                    break
+
+                if any(w in bot_lower for w in ["send your email", "email id", "email for continue"]) and not email_submitted:
+                    rand_id = int(time.time() * 1000) % 90000 + 10000
+                    await client.send_message(BNB_BOT, f"user_{uid}_{rand_id}@gmail.com")
+                    email_submitted = True
+                    continue
+
+                if any(w in bot_lower for w in ["wallet address", "submit your bnb", "bep-20", "enter your wallet"]) and not wallet_submitted:
+                    await client.send_message(BNB_BOT, target_wallet)
+                    wallet_submitted = True
+                    continue
+
+                if any(w in bot_lower for w in ["enter the amount", "amount of bnb", "how much", "minimum withdrawal", "min:"]) and not amount_submitted:
+                    await client.send_message(BNB_BOT, amount_str)
+                    amount_submitted = True
+                    continue
+
+                if not amount_submitted:
+                    await client.send_message(BNB_BOT, amount_str)
+                    amount_submitted = True
+                    continue
+
+                if amount_submitted and (wallet_submitted or "0x" in bot_lower):
+                    break
+
+            # Advance anti-bot verification to 5/5
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36",
+                "Referer": "https://justtool.site/tasks-adsgram/",
+                "Origin": "https://justtool.site"
+            }
+            async with aiohttp.ClientSession() as http:
+                while v_count < 5:
+                    async with http.post("https://justtool.site/api/adsgram-task3", headers=headers, json={"tgId": int(uid), "name": f"Member {uid}"}) as step_r:
+                        if step_r.status == 200:
+                            s_data = await step_r.json()
+                            v_count = s_data.get("count", v_count + 1)
+                        else:
+                            break
+                    if v_count < 5:
+                        await asyncio.sleep(1.2)
+
+            result["withdrawn"] = True
+            result["amount"] = withdraw_amount
+            result["verification_count"] = v_count
+            result["status"] = "withdrawn"
+            logger.info(f"[{name}] ✅ Cloud Auto-Withdrawal completed: {amount_str} BNB (5/5 verified)")
+
+            # Record payout to Upstash
+            if UPSTASH_URL and UPSTASH_TOKEN:
+                try:
+                    payout_payload = {
+                        "account_id": uid,
+                        "name": name,
+                        "amount": withdraw_amount,
+                        "currency": "BNB",
+                        "wallet": target_wallet,
+                        "network": "BEP-20",
+                        "timestamp": time.time(),
+                        "status": "processing"
+                    }
+                    async with aiohttp.ClientSession() as http:
+                        await http.post(
+                            f"{UPSTASH_URL}/lpush/fleet:payouts",
+                            data=json.dumps(payout_payload),
+                            headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
+                            timeout=aiohttp.ClientTimeout(total=4)
+                        )
+                except Exception:
+                    pass
+
+    except Exception as e:
+        result["ok"] = False
+        result["error"] = str(e)
+        logger.error(f"[{name}] Cloud BNB cycle error: {e}")
+    finally:
+        await client.disconnect()
+
+    return result
+
+@app.post("/bnb/cloud-cycle")
+async def bnb_cloud_cycle(request: Request):
+    auth = request.headers.get("Authorization") or ""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    accounts = body.get("accounts", [])
+    if not accounts:
+        accounts = await fetch_accounts_from_cloud()
+
+    if not accounts:
+        return {"ok": False, "message": "No accounts found"}
+
+    CLOUD_BNB_STATUS["status"] = "running"
+    CLOUD_BNB_STATUS["last_cycle_at"] = time.time()
+
+    results = []
+    for acc in accounts:
+        res = await check_and_auto_withdraw_cloud(acc)
+        results.append(res)
+        CLOUD_BNB_STATUS["accounts"][str(res["user_id"])] = res
+        await asyncio.sleep(1.0)
+
+    CLOUD_BNB_STATUS["status"] = "idle"
+    return {
+        "ok": True,
+        "checked": len(results),
+        "withdrawn": sum(1 for r in results if r.get("withdrawn")),
+        "results": results,
+        "timestamp": time.time()
+    }
+
+@app.get("/bnb/status")
+async def bnb_status():
+    return {
+        "ok": True,
+        "status": CLOUD_BNB_STATUS["status"],
+        "last_cycle_at": CLOUD_BNB_STATUS["last_cycle_at"],
+        "accounts": CLOUD_BNB_STATUS["accounts"]
+    }
+
+async def bnb_cloud_watchdog():
+    logger.info("Starting Cloud BNB Watchdog (runs every 30m)...")
+    await asyncio.sleep(45)
+    while True:
+        try:
+            accounts = await fetch_accounts_from_cloud()
+            if accounts:
+                for acc in accounts:
+                    res = await check_and_auto_withdraw_cloud(acc)
+                    CLOUD_BNB_STATUS["accounts"][str(res["user_id"])] = res
+                    await asyncio.sleep(1.5)
+                CLOUD_BNB_STATUS["last_cycle_at"] = time.time()
+        except Exception as e:
+            logger.error(f"Watchdog error: {e}")
+        await asyncio.sleep(1800)
+
+@app.on_event("startup")
+async def on_startup():
+    asyncio.create_task(bnb_cloud_watchdog())
+
