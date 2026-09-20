@@ -602,11 +602,20 @@ async def bnb_status():
         "accounts": CLOUD_BNB_STATUS["accounts"]
     }
 
+BETTERSTACK_HEARTBEAT_URL = "https://uptime.betterstack.com/api/v1/heartbeat/bABS7gYDXgHp6H35XGcU7S6p"
+
 async def bnb_cloud_watchdog():
     logger.info("Starting Cloud BNB Watchdog (runs every 30m)...")
     await asyncio.sleep(45)
     while True:
         try:
+            # 1. Ping BetterStack Heartbeat to confirm Cloud Render is 100% operational
+            async with aiohttp.ClientSession() as session:
+                try:
+                    await session.get(BETTERSTACK_HEARTBEAT_URL, timeout=aiohttp.ClientTimeout(total=10))
+                except Exception as hbe:
+                    logger.warning(f"Heartbeat ping error: {hbe}")
+
             accounts = await fetch_accounts_from_cloud()
             if accounts:
                 for acc in accounts:
