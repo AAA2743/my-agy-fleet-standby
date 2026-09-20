@@ -43,6 +43,10 @@ ULTRAWALLET_BOT = "UltrawalletTrade_Bot"
 ULTRAWALLET_REFERRAL_CODE = "6727787768"
 APX_BOT = "ApxMinerBot"
 APX_REFERRAL_CODE = "6727787768"
+AINOVUM_BOT = "ainovum_bot"
+AINOVUM_REFERRAL_CODE = "ref_6727787768"
+MININGGRAM_BOT = "MiningGRAM_Bot"
+MININGGRAM_REFERRAL_CODE = "339JU9K"
 
 LAST_BATCH_RUN = {
     "status": "idle",
@@ -189,6 +193,38 @@ async def extract_tokens_for_account(acc: dict) -> dict:
                 tokens["apx_init_data"] = apx_init
         except Exception as apx_e:
             logger.debug(f"[{name}] Apex Miner error: {apx_e}")
+
+        # 8. Ainovum Bot WebApp initData
+        try:
+            bot_an = await client.get_entity(AINOVUM_BOT)
+            res_an = await client(RequestWebViewRequest(
+                peer=bot_an,
+                bot=bot_an,
+                platform="android",
+                url=f"https://ainovum.biz/?startapp={AINOVUM_REFERRAL_CODE}&ref={AINOVUM_REFERRAL_CODE}"
+            ))
+            parsed_an = urllib.parse.urlparse(res_an.url)
+            an_init = urllib.parse.parse_qs(parsed_an.fragment).get("tgWebAppData", [None])[0]
+            if an_init:
+                tokens["ainovum_init_data"] = an_init
+        except Exception as ane:
+            logger.debug(f"[{name}] Ainovum error: {ane}")
+
+        # 9. MiningGRAM Bot WebApp initData
+        try:
+            bot_mg = await client.get_input_entity(MININGGRAM_BOT)
+            res_mg = await client(RequestAppWebViewRequest(
+                peer=bot_mg,
+                app=InputBotAppShortName(bot_id=bot_mg, short_name="mine"),
+                platform="android",
+                start_param=MININGGRAM_REFERRAL_CODE
+            ))
+            parsed_mg = urllib.parse.urlparse(res_mg.url)
+            mg_init = urllib.parse.parse_qs(parsed_mg.fragment).get("tgWebAppData", [None])[0]
+            if mg_init:
+                tokens["mininggram_init_data"] = mg_init
+        except Exception as mge:
+            logger.debug(f"[{name}] MiningGRAM error: {mge}")
 
     except Exception as e:
         logger.error(f"[{name}] Telethon connection error: {e}")
