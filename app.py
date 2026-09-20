@@ -372,10 +372,7 @@ async def get_groq_keys() -> list:
     return CACHED_GROQ_KEYS
 
 async def ai_classify_bot_prompt(bot_text: str) -> str:
-    """Uses Groq LPU (sub-150ms) to classify dynamic bot prompts during withdrawal."""
-    keys = await get_groq_keys()
-    if not keys:
-        return "UNKNOWN"
+    """Uses Cloudflare Edge AI (Gemini + Groq + Cloudflare Workers AI) with Groq direct fallback."""
     prompt = (
         f"The Telegram bot sent this message during a withdrawal: '{bot_text}'. "
         f"Classify what the bot requires from the user. Respond with ONLY one word: "
@@ -383,6 +380,28 @@ async def ai_classify_bot_prompt(bot_text: str) -> str:
         f"AMOUNT (asking for withdrawal amount or number), CONFIRM (asking to click a button or confirm), "
         f"or WAIT (asking to wait or showing status)."
     )
+
+    # 1. Primary: Cloudflare Edge Multi-Cloud AI Cascade (Gemini Flash -> Groq -> Workers AI)
+    for cf_url in CF_WORKER_URLS:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.post(
+                    f"{cf_url}/api/ai",
+                    json={"prompt": prompt},
+                    headers={"Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=4)
+                ) as r:
+                    if r.status == 200:
+                        d = await r.json()
+                        ans = (d.get("answer") or "").strip().upper()
+                        for valid in ["WALLET", "EMAIL", "AMOUNT", "CONFIRM", "WAIT"]:
+                            if valid in ans:
+                                return valid
+        except Exception:
+            continue
+
+    # 2. Secondary Fallback: Direct Groq API
+    keys = await get_groq_keys()
     for k in keys:
         try:
             async with aiohttp.ClientSession() as s:
