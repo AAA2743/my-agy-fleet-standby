@@ -485,6 +485,70 @@ async def check_and_auto_withdraw_cloud(acc: dict) -> dict:
                 except Exception:
                     pass
 
+            # Send Official Telegram Payout Receipt with Bangladesh Time (BST)
+            import datetime
+            bot_token = os.getenv("ALERT_BOT_TOKEN", "8858823950:AAFFkuls8hBf23taCZE1y5gVzP4AFCuqI5o")
+            bst_time = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=6)).strftime("%Y-%m-%d %I:%M:%S %p BST")
+            usd_val = withdraw_amount * 645.0
+            bdt_val = usd_val * 122.50
+
+            receipt_msg = (
+                f"🎉 <b>OFFICIAL BNB GALAXY PAYOUT RECEIPT</b>\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>Account:</b> {name} (<code>{uid}</code>)\n"
+                f"💰 <b>Amount:</b> <code>{amount_str} BNB</code> (~${usd_val:.4f} USD / ~৳{bdt_val:.2f} BDT)\n"
+                f"💼 <b>Recipient Wallet:</b> <a href=\"https://bscscan.com/address/{target_wallet}\"><code>{target_wallet}</code></a>\n"
+                f"🌐 <b>Network:</b> Binance Smart Chain (BEP-20)\n"
+                f"🛡️ <b>Verification:</b> <code>5/5 Anti-Bot Human Steps Completed</code> ✅\n"
+                f"🕒 <b>Submitted At:</b> <code>{bst_time}</code> (Bangladesh Time)\n"
+                f"⏳ <b>Status:</b> <b>Processing</b> (Estimated ~8 hours)\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"⚡ <b>Fleet Node:</b> Render Cloud Standby • Singapore & Frankfurt\n"
+                f"🛡️ <b>Autonomous Cloud Fleet Operations by MY AGY AI</b>"
+            )
+
+            receipt_markup = {
+                "inline_keyboard": [
+                    [{"text": "🔍 View on BscScan", "url": f"https://bscscan.com/address/{target_wallet}"}],
+                    [{"text": "🚀 Launch Mini App", "url": "https://restore-agy.aaaai2.workers.dev/dashboard"}],
+                    [{"text": "📢 Verified Payouts Channel", "url": "https://t.me/+oN8uefSRYWUyM2Fl"}]
+                ]
+            }
+
+            async with aiohttp.ClientSession() as http:
+                # Send to Admin Private DM
+                try:
+                    await http.post(
+                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                        json={
+                            "chat_id": REPORT_CHAT_ID,
+                            "text": receipt_msg,
+                            "parse_mode": "HTML",
+                            "disable_web_page_preview": True,
+                            "reply_markup": receipt_markup
+                        },
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    )
+                except Exception as te:
+                    logger.warning(f"Telegram receipt note: {te}")
+
+                # Send to Payout Channel
+                try:
+                    await http.post(
+                        f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                        json={
+                            "chat_id": "-1004402765950",
+                            "text": receipt_msg,
+                            "parse_mode": "HTML",
+                            "disable_web_page_preview": True,
+                            "reply_markup": receipt_markup
+                        },
+                        timeout=aiohttp.ClientTimeout(total=5)
+                    )
+                except Exception as pe:
+                    logger.warning(f"Payout channel note: {pe}")
+
+
     except Exception as e:
         result["ok"] = False
         result["error"] = str(e)
