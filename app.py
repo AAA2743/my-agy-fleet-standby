@@ -290,6 +290,67 @@ async def fetch_accounts_from_cloud():
                 logger.warning(f"Could not load backup zip from {cf_url}: {e}")
     return accounts
 
+CACHED_GROQ_KEYS = []
+
+async def get_groq_keys() -> list:
+    global CACHED_GROQ_KEYS
+    if CACHED_GROQ_KEYS:
+        return CACHED_GROQ_KEYS
+    env_keys = [
+        os.getenv("GROQ_API_KEY_1"),
+        os.getenv("GROQ_API_KEY_2"),
+        os.getenv("GROQ_API_KEY_3"),
+        os.getenv("GROQ_API_KEY")
+    ]
+    CACHED_GROQ_KEYS = [k for k in env_keys if k]
+    if not CACHED_GROQ_KEYS and UPSTASH_URL and UPSTASH_TOKEN:
+        try:
+            async with aiohttp.ClientSession() as s:
+                async with s.get(f"{UPSTASH_URL}/get/fleet:groq_keys", headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"}, timeout=aiohttp.ClientTimeout(total=4)) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        res = data.get("result")
+                        if res:
+                            parsed = json.loads(res) if isinstance(res, str) else res
+                            if isinstance(parsed, list):
+                                CACHED_GROQ_KEYS = [k for k in parsed if k]
+        except Exception:
+            pass
+    return CACHED_GROQ_KEYS
+
+async def ai_classify_bot_prompt(bot_text: str) -> str:
+    """Uses Groq LPU (sub-150ms) to classify dynamic bot prompts during withdrawal."""
+    keys = await get_groq_keys()
+    if not keys:
+        return "UNKNOWN"
+    prompt = (
+        f"The Telegram bot sent this message during a withdrawal: '{bot_text}'. "
+        f"Classify what the bot requires from the user. Respond with ONLY one word: "
+        f"WALLET (asking for crypto wallet address), EMAIL (asking for email address), "
+        f"AMOUNT (asking for withdrawal amount or number), CONFIRM (asking to click a button or confirm), "
+        f"or WAIT (asking to wait or showing status)."
+    )
+    for k in keys:
+        try:
+            async with aiohttp.ClientSession() as s:
+                payload = {
+                    "model": "qwen/qwen3.8-27b",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 10,
+                    "temperature": 0.1
+                }
+                headers = {"Authorization": f"Bearer {k}", "Content-Type": "application/json"}
+                async with s.post("https://api.groq.com/openai/v1/chat/completions", json=payload, headers=headers, timeout=aiohttp.ClientTimeout(total=3)) as r:
+                    if r.status == 200:
+                        d = await r.json()
+                        ans = d.get("choices", [{}])[0].get("message", {}).get("content", "").strip().upper()
+                        for valid in ["WALLET", "EMAIL", "AMOUNT", "CONFIRM", "WAIT"]:
+                            if valid in ans:
+                                return valid
+        except Exception:
+            continue
+    return "UNKNOWN"
+
 async def check_and_auto_withdraw_cloud(acc: dict) -> dict:
     name = acc.get("name", "User")
     uid = str(acc.get("user_id"))
@@ -428,6 +489,30 @@ async def check_and_auto_withdraw_cloud(acc: dict) -> dict:
                 if any(w in bot_lower for w in ["enter the amount", "amount of bnb", "how much", "minimum withdrawal", "min:", "enter amount", "amount to withdraw"]) and not amount_submitted:
                     await client.send_message(BNB_BOT, amount_str)
                     amount_submitted = True
+                    continue
+
+                # AI dynamic classification fallback
+                ai_intent = await ai_classify_bot_prompt(bot_text)
+                logger.info(f"[{name} Turn {turn}] AI Prompt Classification: {ai_intent}")
+
+                if ai_intent == "EMAIL" and not email_submitted:
+                    rand_id = int(time.time() * 1000) % 90000 + 10000
+                    await client.send_message(BNB_BOT, f"user_{uid}_{rand_id}@gmail.com")
+                    email_submitted = True
+                    continue
+
+                if ai_intent == "WALLET" and not wallet_submitted:
+                    await client.send_message(BNB_BOT, target_wallet)
+                    wallet_submitted = True
+                    continue
+
+                if ai_intent == "AMOUNT" and not amount_submitted:
+                    await client.send_message(BNB_BOT, amount_str)
+                    amount_submitted = True
+                    continue
+
+                if ai_intent == "WAIT":
+                    await asyncio.sleep(2.0)
                     continue
 
                 if not amount_submitted and wallet_submitted:
