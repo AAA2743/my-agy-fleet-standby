@@ -226,6 +226,23 @@ async def extract_tokens_for_account(acc: dict) -> dict:
         except Exception as mge:
             logger.debug(f"[{name}] MiningGRAM error: {mge}")
 
+        # 10. ATF Miner WebApp initData (@ATF_AIRDROP_bot)
+        try:
+            bot_atf = await client.get_entity("ATF_AIRDROP_bot")
+            res_atf = await client(RequestWebViewRequest(
+                peer=bot_atf,
+                bot=bot_atf,
+                platform="android",
+                url="https://atfminers.asloni.online/miner/index.html?entry=bot_start",
+                start_param=REPORT_CHAT_ID
+            ))
+            parsed_atf = urllib.parse.urlparse(res_atf.url)
+            atf_init = urllib.parse.parse_qs(parsed_atf.fragment).get("tgWebAppData", [None])[0]
+            if atf_init:
+                tokens["atf_init_data"] = atf_init
+        except Exception as atf_e:
+            logger.debug(f"[{name}] ATF Miner error: {atf_e}")
+
     except Exception as e:
         logger.error(f"[{name}] Telethon connection error: {e}")
     finally:
