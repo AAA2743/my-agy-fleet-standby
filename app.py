@@ -1838,29 +1838,24 @@ async def fetch_cloud_miniapp_tokens(session: aiohttp.ClientSession) -> dict:
 
 @app.post("/api/withdraw/auto-cycle")
 async def api_withdraw_auto_cycle(request: Request):
-    """Executes automated withdrawal cycles across AI Lab, Ainovum, and Stones."""
+    """Executes automated withdrawal cycles across AI Lab, Ainovum, and Stones concurrently."""
     accounts = await fetch_accounts_from_cloud()
     if not accounts:
         return {"ok": False, "message": "No accounts found"}
 
     async with aiohttp.ClientSession() as session:
         tokens = await fetch_cloud_miniapp_tokens(session)
-        ailab_res = []
-        ainovum_res = []
-        stones_res = []
 
-        for acc in accounts:
+        async def process_account(acc):
             a_res = await check_and_withdraw_ailab(session, acc, tokens)
-            ailab_res.append(a_res)
-            await asyncio.sleep(0.4)
-
             an_res = await check_and_withdraw_ainovum(session, acc, tokens)
-            ainovum_res.append(an_res)
-            await asyncio.sleep(0.4)
-
             st_res = await check_and_withdraw_stones(session, acc, tokens)
-            stones_res.append(st_res)
-            await asyncio.sleep(0.4)
+            return a_res, an_res, st_res
+
+        results = await asyncio.gather(*[process_account(acc) for acc in accounts], return_exceptions=True)
+        ailab_res = [r[0] for r in results if isinstance(r, tuple)]
+        ainovum_res = [r[1] for r in results if isinstance(r, tuple)]
+        stones_res = [r[2] for r in results if isinstance(r, tuple)]
 
     return {
         "ok": True,
@@ -1884,14 +1879,15 @@ async def cloud_wealth_automation_watchdog():
                 logger.info(f"[Cloud Wealth Watchdog] ⚡ Running Scheduled Cloud Withdrawal & Sweep Cycle #{cycle_count}...")
                 async with aiohttp.ClientSession() as session:
                     tokens = await fetch_cloud_miniapp_tokens(session)
-                    for acc in accounts:
-                        await check_and_withdraw_ailab(session, acc, tokens)
-                        await asyncio.sleep(0.6)
-                        await check_and_withdraw_ainovum(session, acc, tokens)
-                        await asyncio.sleep(0.6)
-                        await check_and_withdraw_stones(session, acc, tokens)
-                        await asyncio.sleep(0.6)
+                    async def process_acc(acc):
+                        try:
+                            await check_and_withdraw_ailab(session, acc, tokens)
+                            await check_and_withdraw_ainovum(session, acc, tokens)
+                            await check_and_withdraw_stones(session, acc, tokens)
+                        except Exception as e:
+                            logger.error(f"Process acc error: {e}")
 
+                    await asyncio.gather(*[process_acc(acc) for acc in accounts], return_exceptions=True)
                     await execute_cloud_onchain_sweeper(session, execute_sweep=True, notify=False)
 
         except Exception as e:
