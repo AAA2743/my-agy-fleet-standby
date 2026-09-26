@@ -2449,6 +2449,14 @@ async def run_cloud_fleet_farming_cycle(session: aiohttp.ClientSession = None, a
             await session.close()
 
 
+LAST_FARM_RUN = {
+    "status": "idle",
+    "farmed_count": 0,
+    "timestamp": 0,
+    "results": []
+}
+
+
 @app.post("/api/farm/cloud-all")
 async def api_farm_cloud_all(request: Request):
     """Executes on-demand cloud fleet farming cycle across all 8 bots for all accounts."""
@@ -2457,12 +2465,44 @@ async def api_farm_cloud_all(request: Request):
     if auth != f"Bearer {SECRET_KEY}" and req_secret != SECRET_KEY:
         pass
 
-    async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}) as session:
-        accounts = await fetch_accounts_from_cloud()
-        tokens = await fetch_cloud_miniapp_tokens(session)
-        res = await run_cloud_fleet_farming_cycle(session, accounts, tokens)
+    sync_mode = request.query_params.get("sync") == "1"
 
-    return res
+    async def _execute_farming():
+        global LAST_FARM_RUN
+        LAST_FARM_RUN["status"] = "running"
+        LAST_FARM_RUN["timestamp"] = time.time()
+        try:
+            async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}) as session:
+                accounts = await fetch_accounts_from_cloud()
+                tokens = await fetch_cloud_miniapp_tokens(session)
+                res = await run_cloud_fleet_farming_cycle(session, accounts, tokens)
+                LAST_FARM_RUN["status"] = "completed"
+                LAST_FARM_RUN["farmed_count"] = res.get("farmed_count", 0)
+                LAST_FARM_RUN["total_accounts"] = res.get("total_accounts", len(accounts) if accounts else 0)
+                LAST_FARM_RUN["results"] = res.get("results", [])
+                LAST_FARM_RUN["timestamp"] = time.time()
+                return res
+        except Exception as e:
+            logger.error(f"[Farm Trigger] Error: {e}")
+            LAST_FARM_RUN["status"] = f"error: {e}"
+            return {"ok": False, "error": str(e)}
+
+    if sync_mode:
+        return await _execute_farming()
+
+    asyncio.create_task(_execute_farming())
+    return {
+        "ok": True,
+        "status": "dispatched",
+        "message": "Full 8-bot cloud farming cycle dispatched across all accounts in the fleet.",
+        "timestamp": time.time()
+    }
+
+
+@app.get("/api/farm/status")
+async def api_farm_status():
+    """Returns the latest cloud fleet farming execution status and metrics."""
+    return {"ok": True, "last_farm_run": LAST_FARM_RUN, "timestamp": time.time()}
 
 
 @app.post("/api/withdraw/auto-cycle")
