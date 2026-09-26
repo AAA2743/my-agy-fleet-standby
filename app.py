@@ -25,8 +25,8 @@ logger = logging.getLogger("RenderSessionCollector")
 app = FastAPI(title="MY AGY AI — Standby Batch Session Link Collector")
 
 SECRET_KEY = os.getenv("SECRET_KEY", "agy_cf_secret_7d36994e_2026")
-API_ID = int(os.getenv("TELEGRAM_API_ID", "23788736"))
-API_HASH = os.getenv("TELEGRAM_API_HASH", "8098c495e2820d82935041ff91176b65")
+API_ID = int(os.getenv("TELEGRAM_API_ID", "37321306"))
+API_HASH = os.getenv("TELEGRAM_API_HASH", "5cd9e5bbfb572a4429a0c54774153b47")
 REPORT_CHAT_ID = os.getenv("REPORT_CHAT_ID", "6727787768")
 
 CF_WORKER_URLS = [
