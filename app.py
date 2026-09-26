@@ -1820,6 +1820,22 @@ async def api_sweep_execute(request: Request):
     return {"ok": True, "results": res, "timestamp": time.time()}
 
 
+async def fetch_cloud_miniapp_tokens(session: aiohttp.ClientSession) -> dict:
+    """Fetches miniapp session tokens across Cloudflare edge nodes with fallback."""
+    for cf_url in CF_WORKER_URLS:
+        for ep in ["/api/miniapp/tokens", "/api/fleet/tokens"]:
+            try:
+                async with session.get(f"{cf_url}{ep}", timeout=aiohttp.ClientTimeout(total=8)) as r:
+                    if r.status == 200:
+                        data = await r.json()
+                        tokens = data.get("tokens", data) if isinstance(data, dict) else {}
+                        if isinstance(tokens, dict) and any(k.isdigit() for k in tokens.keys()):
+                            return tokens
+            except Exception:
+                pass
+    return {}
+
+
 @app.post("/api/withdraw/auto-cycle")
 async def api_withdraw_auto_cycle(request: Request):
     """Executes automated withdrawal cycles across AI Lab, Ainovum, and Stones."""
@@ -1827,17 +1843,8 @@ async def api_withdraw_auto_cycle(request: Request):
     if not accounts:
         return {"ok": False, "message": "No accounts found"}
 
-    tokens = {}
     async with aiohttp.ClientSession() as session:
-        for cf_url in CF_WORKER_URLS:
-            try:
-                async with session.get(f"{cf_url}/api/fleet/tokens", timeout=aiohttp.ClientTimeout(total=8)) as r:
-                    if r.status == 200:
-                        tokens = await r.json()
-                        break
-            except Exception:
-                pass
-
+        tokens = await fetch_cloud_miniapp_tokens(session)
         ailab_res = []
         ainovum_res = []
         stones_res = []
@@ -1876,16 +1883,7 @@ async def cloud_wealth_automation_watchdog():
             if accounts:
                 logger.info(f"[Cloud Wealth Watchdog] ⚡ Running Scheduled Cloud Withdrawal & Sweep Cycle #{cycle_count}...")
                 async with aiohttp.ClientSession() as session:
-                    tokens = {}
-                    for cf_url in CF_WORKER_URLS:
-                        try:
-                            async with session.get(f"{cf_url}/api/fleet/tokens", timeout=aiohttp.ClientTimeout(total=8)) as r:
-                                if r.status == 200:
-                                    tokens = await r.json()
-                                    break
-                        except Exception:
-                            pass
-
+                    tokens = await fetch_cloud_miniapp_tokens(session)
                     for acc in accounts:
                         await check_and_withdraw_ailab(session, acc, tokens)
                         await asyncio.sleep(0.6)
