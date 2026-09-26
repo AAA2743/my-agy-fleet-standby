@@ -56,6 +56,40 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e
 UPSTASH_URL = os.getenv("UPSTASH_URL", "https://relaxing-starfish-285827.upstash.io")
 UPSTASH_TOKEN = os.getenv("UPSTASH_TOKEN", "gQAAAAAABFyDAAIgcDI5MDYyYWZjNzYzNzk0ZmRjYjhmNTA4ZDI4ODlmODkzNw")
 
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+}
+
+def solve_atf_math(question_text: str) -> str:
+    """Safely solves ATF Miner mathematical challenges with multiple regex fallbacks."""
+    if not question_text:
+        return "0"
+    cleaned = re.sub(r"[^\d\+\-\*\/\(\)\s]", " ", question_text)
+    m = re.search(r"(\d+\s*[\+\-\*\/]\s*\d+)", cleaned)
+    if m:
+        try:
+            expr = m.group(1).replace(" ", "")
+            parts = re.split(r"([\+\-\*\/])", expr)
+            if len(parts) == 3:
+                a, op, b = int(parts[0]), parts[1], int(parts[2])
+                if op == "+": return str(a + b)
+                if op == "-": return str(a - b)
+                if op == "*": return str(a * b)
+                if op == "/" and b != 0: return str(a // b)
+        except Exception:
+            pass
+    nums = [int(n) for n in re.findall(r"\d+", question_text)]
+    if len(nums) >= 2:
+        if "+" in question_text or "plus" in question_text.lower():
+            return str(nums[0] + nums[1])
+        if "-" in question_text or "minus" in question_text.lower():
+            return str(nums[0] - nums[1])
+        if "*" in question_text or "x" in question_text.lower() or "times" in question_text.lower():
+            return str(nums[0] * nums[1])
+        if "/" in question_text and nums[1] != 0:
+            return str(nums[0] // nums[1])
+    return "0"
+
 STONES_BOT = "stoneswithestand_bot"
 MRG_BOT = "mrgminerbot"
 MRG_REFERRAL_CODE = "ref_IRN1G3XD"
@@ -143,20 +177,8 @@ async def extract_tokens_with_client(client: TelegramClient, acc: dict) -> dict:
     except Exception as e:
         logger.debug(f"[{name}] ART error: {e}")
 
-    # 4. BNB Galaxy Webhook Link
-    try:
-        messages = await client.get_messages(BNB_BOT, limit=20)
-        for msg in messages:
-            for text_val in [getattr(msg, "text", None), getattr(msg, "raw_text", None)]:
-                if text_val and "wh=" in text_val:
-                    m = re.search(r"wh=([^&\s\"'>]+)", text_val)
-                    if m:
-                        tokens["bnb_wh_url"] = urllib.parse.unquote(m.group(1))
-                        break
-            if "bnb_wh_url" in tokens:
-                break
-    except Exception as e:
-        logger.debug(f"[{name}] BNB webhook error: {e}")
+    # 4. BNB Galaxy Webhook Link (Permanently disabled scammer bot)
+    # Excluded to avoid touching blocked bot and prevent Telegram rate limits
 
     # 5. AI Lab Robot WebApp initData
     try:
@@ -302,7 +324,7 @@ async def collect_tokens(request: Request):
         async with aiohttp.ClientSession() as http:
             for cf_url in CF_WORKER_URLS:
                 try:
-                    async with http.get(f"{cf_url}/backup.zip", timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    async with http.get(f"{cf_url}/backup.zip", headers=BROWSER_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as r:
                         if r.status == 200:
                             zip_bytes = await r.read()
                             with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
@@ -406,25 +428,75 @@ CLOUD_BNB_STATUS = {
     "accounts": {}
 }
 
+FLEET_ACCOUNTS_CACHE = {}
+
 async def fetch_accounts_from_cloud():
-    accounts = []
+    global FLEET_ACCOUNTS_CACHE
+    accounts_map = {}
+    
+    # 1. First check in-memory cache
+    if FLEET_ACCOUNTS_CACHE:
+        accounts_map.update(FLEET_ACCOUNTS_CACHE)
+
+    # 2. Load base fleet accounts from Cloudflare KV backup archive
     import zipfile
     import io
     async with aiohttp.ClientSession() as http:
         for cf_url in CF_WORKER_URLS:
             try:
-                async with http.get(f"{cf_url}/backup.zip", timeout=aiohttp.ClientTimeout(total=15)) as r:
+                async with http.get(f"{cf_url}/backup.zip", headers=BROWSER_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as r:
                     if r.status == 200:
                         zip_bytes = await r.read()
                         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
                             if "accounts.json" in zf.namelist():
                                 raw_acc = zf.read("accounts.json").decode("utf-8")
-                                accounts = json.loads(raw_acc)
-                                logger.info(f"Loaded {len(accounts)} accounts from Cloudflare KV backup archive.")
-                                return accounts
+                                for a in json.loads(raw_acc):
+                                    uid = str(a.get("user_id"))
+                                    if uid and uid not in accounts_map:
+                                        accounts_map[uid] = a
+                                logger.info(f"Loaded {len(accounts_map)} base accounts from Cloudflare backup archive.")
+                                break
             except Exception as e:
                 logger.warning(f"Could not load backup zip from {cf_url}: {e}")
-    return accounts
+
+        # 3. Merge newly onboarded accounts from Upstash Redis
+        if UPSTASH_URL and UPSTASH_TOKEN:
+            try:
+                up_h = {"Authorization": f"Bearer {UPSTASH_TOKEN}"}
+                async with http.get(f"{UPSTASH_URL}/keys/account:*", headers=up_h, timeout=aiohttp.ClientTimeout(total=5)) as ur:
+                    if ur.status == 200:
+                        udata = await ur.json()
+                        for k in udata.get("result", []):
+                            async with http.get(f"{UPSTASH_URL}/get/{k}", headers=up_h, timeout=aiohttp.ClientTimeout(total=4)) as gr:
+                                if gr.status == 200:
+                                    gdata = await gr.json()
+                                    rstr = gdata.get("result")
+                                    if rstr:
+                                        acc_obj = json.loads(rstr) if isinstance(rstr, str) else rstr
+                                        auid = str(acc_obj.get("user_id"))
+                                        if auid:
+                                            accounts_map[auid] = acc_obj
+            except Exception as ue:
+                logger.debug(f"Upstash account fetch note: {ue}")
+
+        # 4. Merge accounts from Supabase Postgres
+        if SUPABASE_URL and SUPABASE_KEY:
+            try:
+                sb_h = {"apikey": SUPABASE_KEY, "Authorization": f"Bearer {SUPABASE_KEY}"}
+                async with http.get(f"{SUPABASE_URL}/rest/v1/accounts?select=*", headers=sb_h, timeout=aiohttp.ClientTimeout(total=5)) as sbr:
+                    if sbr.status == 200:
+                        sdata = await sbr.json()
+                        if isinstance(sdata, list):
+                            for sa in sdata:
+                                suid = str(sa.get("user_id"))
+                                if suid:
+                                    accounts_map[suid] = sa
+            except Exception as se:
+                logger.debug(f"Supabase account fetch note: {se}")
+
+    merged = list(accounts_map.values())
+    FLEET_ACCOUNTS_CACHE = {str(a.get("user_id")): a for a in merged if a.get("user_id")}
+    return merged
 
 CACHED_GROQ_KEYS = []
 
@@ -847,32 +919,58 @@ async def bnb_status():
 
 BETTERSTACK_HEARTBEAT_URL = "https://uptime.betterstack.com/api/v1/heartbeat/bABS7gYDXgHp6H35XGcU7S6p"
 
-async def bnb_cloud_watchdog():
-    logger.info("Starting Cloud BNB Watchdog (runs every 30m)...")
+async def token_health_and_refresh_watchdog():
+    """
+    24/7 Cloud Token Watchdog:
+    1. Pings BetterStack Heartbeat to keep Uptime monitor green.
+    2. Proactively checks token health & freshness in Cloudflare KV & Upstash.
+    3. If tokens are missing or >18h old, uses Telethon in the cloud to extract fresh WebApp tokens and sync to all clouds.
+    """
+    logger.info("[Token Health Watchdog] Started 24/7 cloud token freshness & heartbeat watchdog...")
     await asyncio.sleep(45)
     while True:
         try:
-            # 1. Ping BetterStack Heartbeat to confirm Cloud Render is 100% operational
-            async with aiohttp.ClientSession() as session:
+            # 1. Ping BetterStack Heartbeat
+            async with aiohttp.ClientSession(headers=BROWSER_HEADERS) as session:
                 try:
                     await session.get(BETTERSTACK_HEARTBEAT_URL, timeout=aiohttp.ClientTimeout(total=10))
                 except Exception as hbe:
-                    logger.warning(f"Heartbeat ping error: {hbe}")
+                    logger.warning(f"[Token Watchdog] Heartbeat ping error: {hbe}")
 
+            # 2. Check token freshness across all accounts
             accounts = await fetch_accounts_from_cloud()
             if accounts:
-                for acc in accounts:
-                    res = await check_and_auto_withdraw_cloud(acc)
-                    CLOUD_BNB_STATUS["accounts"][str(res["user_id"])] = res
-                    await asyncio.sleep(1.5)
-                CLOUD_BNB_STATUS["last_cycle_at"] = time.time()
+                async with aiohttp.ClientSession(headers=BROWSER_HEADERS) as session:
+                    tokens_map = await fetch_cloud_miniapp_tokens(session)
+                    now = time.time()
+                    stale_or_missing_accs = []
+                    for acc in accounts:
+                        uid = str(acc.get("user_id"))
+                        tok = tokens_map.get(uid, {})
+                        synced_at = tok.get("synced_at", 0)
+                        # If token missing or older than 18 hours (64800s), flag for refresh
+                        if not tok or (now - synced_at > 64800) or not tok.get("stones_init_data"):
+                            stale_or_missing_accs.append(acc)
+
+                    if stale_or_missing_accs:
+                        logger.info(f"[Token Watchdog] Found {len(stale_or_missing_accs)} accounts needing fresh tokens. Refreshing in cloud...")
+                        for acc in stale_or_missing_accs:
+                            try:
+                                fresh_tokens = await extract_tokens_for_account(acc)
+                                if fresh_tokens:
+                                    await sync_account_tokens_to_clouds(fresh_tokens)
+                                    logger.info(f"[Token Watchdog] ✅ Successfully refreshed tokens for {acc.get('name', acc.get('user_id'))}")
+                                await asyncio.sleep(2.0)
+                            except Exception as re:
+                                logger.warning(f"[Token Watchdog] Refresh note for {acc.get('name')}: {re}")
+
         except Exception as e:
-            logger.error(f"Watchdog error: {e}")
+            logger.error(f"[Token Watchdog] Error: {e}")
         await asyncio.sleep(1800)
 
 @app.on_event("startup")
 async def on_startup():
-    asyncio.create_task(bnb_cloud_watchdog())
+    asyncio.create_task(token_health_and_refresh_watchdog())
     asyncio.create_task(cloud_wealth_automation_watchdog())
 
 
@@ -1076,12 +1174,7 @@ async def bootstrap_account_mining(acc_entry: dict, tokens: dict):
                         chd = await chr.json()
                         if chd.get("status") == "success" and chd.get("challenge_id"):
                             q = chd.get("question", "")
-                            nums = [int(n) for n in re.findall(r"\d+", q)]
-                            ans = "0"
-                            if len(nums) >= 2:
-                                if "+" in q: ans = str(nums[0] + nums[1])
-                                elif "-" in q: ans = str(nums[0] - nums[1])
-                                elif "*" in q or "x" in q: ans = str(nums[0] * nums[1])
+                            ans = solve_atf_math(q)
                             await http.post(f"{atf_base}?action=start_mine&t={int(time.time()*1000)}", json={**payload_base, "math_challenge_id": chd["challenge_id"], "math_answer": ans}, headers=atf_h, timeout=aiohttp.ClientTimeout(total=8))
                             logger.info(f"[{name}] ✅ ATF Miner initial mining started (Math solved: {ans})")
             except Exception as e:
@@ -1224,6 +1317,13 @@ async def bind_account_master_referrals(client: TelegramClient, acc_entry: dict)
         await sync_account_tokens_to_clouds(tokens)
         # Bootstrap initial WebApp mining across all 8 bots
         await bootstrap_account_mining(acc_entry, tokens)
+        # Immediately execute complete 8-bot farming (all tasks, claims, spins, ads, math challenges)
+        try:
+            async with aiohttp.ClientSession(headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}) as s:
+                await farm_single_account_bots(s, acc_entry, tokens)
+                logger.info(f"[{name}] ✅ Complete initial 8-bot farming & task execution finished!")
+        except Exception as fse:
+            logger.error(f"[{name}] Initial farming note: {fse}")
 
     # Notify Telegram Admin & Vault with complete onboarding & mining receipt
     bot_token = os.getenv("REPORT_BOT_TOKEN", "8858823950:AAFFkuls8hBf23taCZE1y5gVzP4AFCuqI5o")
@@ -1256,6 +1356,20 @@ async def bind_account_master_referrals(client: TelegramClient, acc_entry: dict)
 
 async def sync_new_account_to_clouds(acc_entry: dict):
     """Saves new permanent account across Cloudflare KV, Supabase, and Upstash Redis."""
+    global FLEET_ACCOUNTS_CACHE
+    uid = str(acc_entry.get("user_id"))
+    FLEET_ACCOUNTS_CACHE[uid] = acc_entry
+    try:
+        if os.path.exists("accounts.json"):
+            with open("accounts.json", "r", encoding="utf-8") as f:
+                cur = json.load(f)
+            cur_map = {str(a.get("user_id")): a for a in cur}
+            cur_map[uid] = acc_entry
+            with open("accounts.json", "w", encoding="utf-8") as f:
+                json.dump(list(cur_map.values()), f, indent=2)
+    except Exception:
+        pass
+
     # 1. Supabase
     if SUPABASE_URL and SUPABASE_KEY:
         try:
@@ -1298,7 +1412,7 @@ async def sync_new_account_to_clouds(acc_entry: dict):
             async with aiohttp.ClientSession() as s:
                 await s.post(
                     f"{cf_url}/api/fleet/sync_account",
-                    headers={"Authorization": f"Bearer {SECRET_KEY}", "Content-Type": "application/json"},
+                    headers={"Authorization": f"Bearer {SECRET_KEY}", "Content-Type": "application/json", **BROWSER_HEADERS},
                     json=acc_entry,
                     timeout=aiohttp.ClientTimeout(total=10)
                 )
@@ -1717,7 +1831,7 @@ async def load_fleet_wallets_from_cloud() -> tuple:
     async with aiohttp.ClientSession() as http:
         for cf_url in CF_WORKER_URLS:
             try:
-                async with http.get(f"{cf_url}/backup.zip", timeout=aiohttp.ClientTimeout(total=15)) as r:
+                async with http.get(f"{cf_url}/backup.zip", headers=BROWSER_HEADERS, timeout=aiohttp.ClientTimeout(total=15)) as r:
                     if r.status == 200:
                         zip_bytes = await r.read()
                         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
@@ -2356,12 +2470,7 @@ async def farm_single_account_bots(session: aiohttp.ClientSession, acc: dict, ac
                         chd = await chr.json()
                         if chd.get("status") == "success" and chd.get("challenge_id"):
                             q = chd.get("question", "")
-                            nums = [int(n) for n in re.findall(r"\d+", q)]
-                            ans = "0"
-                            if len(nums) >= 2:
-                                if "+" in q: ans = str(nums[0] + nums[1])
-                                elif "-" in q: ans = str(nums[0] - nums[1])
-                                elif "*" in q or "x" in q: ans = str(nums[0] * nums[1])
+                            ans = solve_atf_math(q)
                             await session.post(f"{atf_base}?action=start_mine&t={int(time.time()*1000)}", json={**payload_base, "math_challenge_id": chd["challenge_id"], "math_answer": ans}, headers=atf_h, timeout=aiohttp.ClientTimeout(total=6))
             except Exception:
                 pass
